@@ -112,6 +112,7 @@ func (ps *PersistedState) LoadViewChangeIfApplicable() (*protos.ViewChange, erro
 	return nil, nil
 }
 
+// 从WAL 恢复出view
 func (ps *PersistedState) Restore(v *View) error {
 	// Unless we conclude otherwise, we're in a COMMITTED state
 	v.Phase = COMMITTED
@@ -123,7 +124,7 @@ func (ps *PersistedState) Restore(v *View) error {
 	}
 
 	ps.Logger.Infof("WAL contains %d entries", len(entries))
-
+	// 取出上一条持久化的消息
 	lastEntry := entries[len(entries)-1]
 	lastPersistedMessage := &protos.SavedMessage{}
 	if err := proto.Unmarshal(lastEntry, lastPersistedMessage); err != nil {
@@ -152,6 +153,13 @@ func (ps *PersistedState) Restore(v *View) error {
 	return errors.Errorf("unrecognized record: %v", lastPersistedMessage)
 }
 
+// recoverProposed
+//
+//	@Description: 从lastPersistedMessage 提取出 PrePrepare消息 到 v中去
+//	@receiver ps
+//	@param lastPersistedMessage
+//	@param v
+//	@return error
 func (ps *PersistedState) recoverProposed(lastPersistedMessage *protos.ProposedRecord, v *View) error {
 	prop := lastPersistedMessage.GetPrePrepare().Proposal
 	v.inFlightProposal = &types.Proposal{

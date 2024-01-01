@@ -57,14 +57,14 @@ type Pool struct {
 
 	cancel         context.CancelFunc
 	lock           sync.RWMutex
-	fifo           *list.List
-	semaphore      *semaphore.Weighted
-	existMap       map[types.RequestInfo]*list.Element
-	timeoutHandler RequestTimeoutHandler
+	fifo           *list.List                          // 存储请求的队列
+	semaphore      *semaphore.Weighted                 // 信号量大小=pool的size，用于控制最大请求数量
+	existMap       map[types.RequestInfo]*list.Element // 已经存在池中的请求
+	timeoutHandler RequestTimeoutHandler               // 超时处理器
 	closed         bool
 	stopped        bool
-	submittedChan  chan struct{}
-	sizeBytes      uint64
+	submittedChan  chan struct{} // 一旦提交到pool中，会像该channel中发送消息
+	sizeBytes      uint64        // pool中原始请求的总大小
 	delMap         map[types.RequestInfo]struct{}
 	delSlice       []types.RequestInfo
 }
@@ -72,8 +72,8 @@ type Pool struct {
 // requestItem captures request related information
 type requestItem struct {
 	request           []byte
-	timeout           *time.Timer
-	additionTimestamp time.Time
+	timeout           *time.Timer // 超时定时器
+	additionTimestamp time.Time   // 添加进池子的事件戳
 }
 
 // PoolOptions is the pool configuration
@@ -238,7 +238,7 @@ func (rp *Pool) Submit(request []byte) error {
 		rp.logger.Debugf("request %s has been already processed", reqInfo)
 		return ErrReqAlreadyProcessed
 	}
-
+	// 这是一个定时器 timeout，会执行后面的方法
 	to := time.AfterFunc(
 		rp.options.ForwardTimeout,
 		func() { rp.onRequestTO(reqCopy, reqInfo) },
@@ -252,7 +252,7 @@ func (rp *Pool) Submit(request []byte) error {
 		timeout:           to,
 		additionTimestamp: time.Now(),
 	}
-
+	// 把请求放入队列 并且放进existMap
 	element := rp.fifo.PushBack(reqItem)
 	rp.metrics.CountOfRequestPool.Set(float64(rp.fifo.Len()))
 	rp.metrics.CountOfRequestPoolAll.Add(1)
@@ -269,7 +269,7 @@ func (rp *Pool) Submit(request []byte) error {
 	case rp.submittedChan <- struct{}{}:
 	default:
 	}
-
+	// 更新请求池中请求大小
 	rp.sizeBytes += uint64(len(element.Value.(*requestItem).request))
 
 	return nil
@@ -286,6 +286,7 @@ func (rp *Pool) Size() int {
 // NextRequests returns the next requests to be batched.
 // It returns at most maxCount requests, and at most maxSizeBytes, in a newly allocated slice.
 // Return variable full indicates that the batch cannot be increased further by calling again with the same arguments.
+// check 表示 如果pool中数量 少于maxCount 并且 pool中请求大小 小于maxSizeBytes 直接返回nil
 func (rp *Pool) NextRequests(maxCount int, maxSizeBytes uint64, check bool) (batch [][]byte, full bool) {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
@@ -315,7 +316,7 @@ func (rp *Pool) NextRequests(maxCount int, maxSizeBytes uint64, check bool) (bat
 
 	fullS := totalSize >= maxSizeBytes
 	fullC := len(batch) == maxCount
-	full = fullS || fullC
+	full = fullS || fullC //表示满足 请求，batch 可以进行打包进区块了
 	if len(batch) > 0 {
 		rp.logger.Debugf("Returning batch of %d requests totalling %dB",
 			len(batch), totalSize)

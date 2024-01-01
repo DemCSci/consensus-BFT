@@ -49,6 +49,7 @@ type change struct {
 }
 
 // ViewChanger is responsible for running the view change protocol
+// 运行视图改变协议
 type ViewChanger struct {
 	// Configuration
 	SelfID             uint64
@@ -56,9 +57,9 @@ type ViewChanger struct {
 	N                  uint64
 	f                  int
 	quorum             int
-	SpeedUpViewChange  bool
-	LeaderRotation     bool
-	DecisionsPerLeader uint64
+	SpeedUpViewChange  bool   // 加快视图改变
+	LeaderRotation     bool   // leader 轮换
+	DecisionsPerLeader uint64 // 每个leader决策
 
 	Logger       api.Logger
 	Comm         Comm
@@ -98,8 +99,8 @@ type ViewChanger struct {
 	Restore                   chan struct{}
 	InMsqQSize                int
 	incMsgs                   chan *incMsg
-	viewChangeMsgs            *voteSet
-	viewDataMsgs              *voteSet
+	viewChangeMsgs            *voteSet // viewChange 消息投票集合
+	viewDataMsgs              *voteSet // viewData 消息投票集合
 	nvs                       *nextViews
 	realView                  uint64
 	currView                  uint64
@@ -116,6 +117,7 @@ type ViewChanger struct {
 }
 
 // Start the view changer
+// 启动视图更改器
 func (v *ViewChanger) Start(startViewNumber uint64) {
 	v.incMsgs = make(chan *incMsg, v.InMsqQSize)
 	v.startChangeChan = make(chan *change, 2)
@@ -160,6 +162,7 @@ func (v *ViewChanger) Start(startViewNumber uint64) {
 
 func (v *ViewChanger) setupVotes() {
 	// view change
+	// 判断 是否是view change消息
 	acceptViewChange := func(_ uint64, message *protos.Message) bool {
 		return message.GetViewChange() != nil
 	}
@@ -169,6 +172,7 @@ func (v *ViewChanger) setupVotes() {
 	v.viewChangeMsgs.clear(v.N)
 
 	// view data
+	// 判断是否是 viewData消息
 	acceptViewData := func(_ uint64, message *protos.Message) bool {
 		return message.GetViewData() != nil
 	}
@@ -207,12 +211,14 @@ func (v *ViewChanger) HandleMessage(sender uint64, m *protos.Message) {
 	}
 }
 
+// 事件循环， 处理各种消息
 func (v *ViewChanger) run() {
 	for {
 		select {
 		case <-v.stopChan:
 			return
 		case changeMsg := <-v.startChangeChan:
+			// 处理视图改变
 			v.startViewChange(changeMsg)
 		case msg := <-v.incMsgs:
 			v.processMsg(msg.sender, msg.Message)
@@ -271,6 +277,7 @@ func (v *ViewChanger) checkIfTimeout(now time.Time) bool {
 
 func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 	// viewChange message
+	// 如果是viewChange 消息
 	if vc := m.GetViewChange(); vc != nil {
 		v.Logger.Debugf("Node %d is processing a view change message %v from %d with next view %d", v.SelfID, m, sender, vc.NextView)
 		v.nvs.registerNext(vc.NextView, sender)
@@ -300,6 +307,7 @@ func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 		return
 	}
 
+	// 如果是viewData消息
 	// viewData message
 	if vd := m.GetViewData(); vd != nil {
 		v.Logger.Debugf("Node %d is processing a view data message %s from %d", v.SelfID, MsgToString(m), sender)
@@ -310,7 +318,7 @@ func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 		v.processViewDataMsg()
 		return
 	}
-
+	// 如果是newVIew 消息
 	// newView message
 	if nv := m.GetNewView(); nv != nil {
 		v.Logger.Debugf("Node %d is processing a new view message %s from %d", v.SelfID, MsgToString(m), sender)
@@ -353,6 +361,9 @@ func (v *ViewChanger) informNewView(view uint64) {
 }
 
 // StartViewChange initiates a view change
+// 外部调用 启动视图改变，发送视图改变消息
+// view 要变更的视图
+// stopView 是否停止当前视图
 func (v *ViewChanger) StartViewChange(view uint64, stopView bool) {
 	select {
 	case v.startChangeChan <- &change{view: view, stopView: stopView}:
@@ -361,11 +372,14 @@ func (v *ViewChanger) StartViewChange(view uint64, stopView bool) {
 }
 
 // StartViewChange stops current view and timeouts, and broadcasts a view change message to all
+// 停止当前视图和超时，并向所有人广播视图更改消息
+// 也就是说 change中的view 并不是前往的编号。
 func (v *ViewChanger) startViewChange(change *change) {
 	if change.view < v.currView { // this is about an old view
 		v.Logger.Debugf("Node %d has a view change request with an old view %d, while the current view is %d", v.SelfID, change.view, v.currView)
 		return
 	}
+	// 判断是否正在视图更改中
 	if v.nextView == v.currView+1 {
 		v.Logger.Debugf("Node %d has already started view change with last view %d", v.SelfID, v.currView)
 		v.checkTimeout = true // make sure timeout is checked anyway
@@ -374,6 +388,7 @@ func (v *ViewChanger) startViewChange(change *change) {
 	v.nextView = v.currView + 1
 	v.MetricsViewChange.NextView.Set(float64(v.nextView))
 	v.RequestsTimer.StopTimers()
+	// 构建viewChange消息
 	msg := &protos.Message{
 		Content: &protos.Message_ViewChange{
 			ViewChange: &protos.ViewChange{
@@ -381,8 +396,10 @@ func (v *ViewChanger) startViewChange(change *change) {
 			},
 		},
 	}
+	// 广播 viewChange消息
 	v.Comm.BroadcastConsensus(msg)
 	v.Logger.Debugf("Node %d started view change, last view is %d", v.SelfID, v.currView)
+	// 是否放弃当前视图
 	if change.stopView {
 		v.Controller.AbortView(v.currView) // abort the current view when joining view change
 	}

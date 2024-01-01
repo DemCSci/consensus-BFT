@@ -20,6 +20,7 @@ import (
 )
 
 // Phase indicates the status of the view
+// 指示视图的状态
 type Phase uint8
 
 // These are the different phases
@@ -71,10 +72,10 @@ type View struct {
 	DecisionsPerLeader uint64
 	RetrieveCheckpoint CheckpointRetriever
 	SelfID             uint64
-	N                  uint64
+	N                  uint64 // 节点数量
 	LeaderID           uint64
 	Quorum             int
-	Number             uint64
+	Number             uint64 // view 编号
 	Decider            Decider
 	FailureDetector    FailureDetector
 	Sync               Synchronizer
@@ -96,10 +97,12 @@ type View struct {
 	inFlightRequests      []types.RequestInfo
 	lastBroadcastSent     *protos.Message
 	// Current sequence sent prepare and commit
+	// 当前序列 发送的 prepare and commit
 	currPrepareSent *protos.Message
 	currCommitSent  *protos.Message
 	// Prev sequence sent prepare and commit
 	// to help lagging replicas catch up
+	// 帮助落后的副本赶上
 	prevPrepareSent *protos.Message
 	prevCommitSent  *protos.Message
 	// Current proposal
@@ -123,6 +126,7 @@ type View struct {
 }
 
 // Start starts the view
+// 启动视图
 func (v *View) Start() {
 	v.stopOnce = sync.Once{}
 	v.incMsgs = make(chan *incMsg, v.InMsgQSize)
@@ -140,12 +144,14 @@ func (v *View) Start() {
 	}()
 }
 
+// 初始化了 v.prepares nextPrepares commits nextCommits
 func (v *View) setupVotes() {
 	// Prepares
+	// 只需要验证是不是prepare消息就可以了
 	acceptPrepares := func(_ uint64, message *protos.Message) bool {
 		return message.GetPrepare() != nil
 	}
-
+	//收到 prepare 消息 就是一轮投票
 	v.prepares = &voteSet{
 		validVote: acceptPrepares,
 	}
@@ -157,6 +163,7 @@ func (v *View) setupVotes() {
 	v.nextPrepares.clear(v.N)
 
 	// Commits
+	// 需要验证 是否是commit消息 && commit 消息的签名者也是发送者
 	acceptCommits := func(sender uint64, message *protos.Message) bool {
 		commit := message.GetCommit()
 		if commit == nil {
@@ -181,6 +188,7 @@ func (v *View) setupVotes() {
 }
 
 // HandleMessage handles incoming messages
+// 分发 外部传来的消息
 func (v *View) HandleMessage(sender uint64, m *protos.Message) {
 	msg := &incMsg{sender: sender, Message: m}
 	select {
@@ -190,6 +198,7 @@ func (v *View) HandleMessage(sender uint64, m *protos.Message) {
 	}
 }
 
+// 处理 外部传来的消息
 func (v *View) processMsg(sender uint64, m *protos.Message) {
 	if v.Stopped() {
 		return
@@ -198,6 +207,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 	msgViewNum := viewNumber(m)
 	msgProposalSeq := proposalSequence(m)
 
+	// 消息中的 视图 编号和 本节点的视图编号不同
 	if msgViewNum != v.Number {
 		v.Logger.Warnf("%d got message %v from %d of view %d, expected view %d", v.SelfID, m, sender, msgViewNum, v.Number)
 		if sender != v.LeaderID {
@@ -206,13 +216,14 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 		}
 		v.FailureDetector.Complain(v.Number, false)
 		// Else, we got a message with a wrong view from the leader.
+		// 说明本节点落后，需要调用同步机制
 		if msgViewNum > v.Number {
 			v.Sync.Sync()
 		}
 		v.stop()
 		return
 	}
-
+	// 如果消息中的seq = 当前view seq的前一个
 	if msgProposalSeq == v.ProposalSequence-1 && v.ProposalSequence > 0 {
 		v.handlePrevSeqMessage(msgProposalSeq, sender, m)
 		return
@@ -220,6 +231,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 
 	v.Logger.Debugf("%d got message %s from %d with seq %d", v.SelfID, MsgToString(m), sender, msgProposalSeq)
 	// This message is either for this proposal or the next one (we might be behind the rest)
+	// 此消息是针对此提案或下一个提案 (我们可能会落后于其余部分)
 	if msgProposalSeq != v.ProposalSequence && msgProposalSeq != v.ProposalSequence+1 {
 		v.Logger.Warnf("%d got message from %d with sequence %d but our sequence is %d", v.SelfID, sender, msgProposalSeq, v.ProposalSequence)
 		v.discoverIfSyncNeeded(sender, m)
@@ -227,7 +239,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 	}
 
 	msgForNextProposal := msgProposalSeq == v.ProposalSequence+1
-
+	// 处理 prePrepare 消息
 	if pp := m.GetPrePrepare(); pp != nil {
 		v.processPrePrepare(pp, m, msgForNextProposal, sender)
 		return
@@ -239,6 +251,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 		return
 	}
 
+	// 处理prepare消息
 	if prp := m.GetPrepare(); prp != nil {
 		if msgForNextProposal {
 			v.nextPrepares.registerVote(sender, m)
@@ -248,6 +261,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 		return
 	}
 
+	// 处理commit消息
 	if cmt := m.GetCommit(); cmt != nil {
 		if msgForNextProposal {
 			v.nextCommits.registerVote(sender, m)
@@ -258,6 +272,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 	}
 }
 
+// 事件循环机制
 func (v *View) run() {
 	defer v.viewEnded.Done()
 	defer func() {
@@ -281,9 +296,11 @@ func (v *View) run() {
 func (v *View) doPhase() {
 	switch v.Phase {
 	case PROPOSED:
+		// commited 阶段后会来到这里，但是commit中并没有发送prepare消息，所以需要在这里发送
 		v.Comm.BroadcastConsensus(v.lastBroadcastSent) // broadcast here serves also recovery
 		v.Phase = v.processPrepares()
 	case PREPARED:
+		// 发送commit 消息
 		v.Comm.BroadcastConsensus(v.lastBroadcastSent)
 		v.Phase = v.prepared()
 	case COMMITTED:
@@ -297,6 +314,14 @@ func (v *View) doPhase() {
 	v.MetricsView.Phase.Set(float64(v.Phase))
 }
 
+// processPrePrepare
+//
+//	@Description: 过滤不合理prePrepare消息  将消息发送到prePrepareChan中，发送道 chan中的消息 竟然取自 v
+//	@receiver v
+//	@param pp 消息体
+//	@param m
+//	@param msgForNextProposal pp中的seq 是否 = 当前view 的 seq + 1
+//	@param sender 发送者
 func (v *View) processPrePrepare(pp *protos.PrePrepare, m *protos.Message, msgForNextProposal bool, sender uint64) {
 	if pp.Proposal == nil {
 		v.Logger.Warnf("%d got pre-prepare from %d with empty proposal", v.SelfID, sender)
@@ -322,6 +347,7 @@ func (v *View) processPrePrepare(pp *protos.PrePrepare, m *protos.Message, msgFo
 	}
 }
 
+// 进入了 prepared状态， 等待接收 足量的 commit 消息
 func (v *View) prepared() Phase {
 	proposal := v.inFlightProposal
 	signatures, phase := v.processCommits(proposal)
@@ -342,11 +368,12 @@ func (v *View) prepared() Phase {
 	}
 	v.MetricsView.SizeOfBatch.Add(float64(size))
 	v.MetricsView.LatencyBatchProcessing.Observe(time.Since(v.beginPrePrepare).Seconds())
-
+	// 能来到这里 说明收集到了足量的commit 消息，可以提交了
 	v.decide(proposal, signatures, v.inFlightRequests)
 	return COMMITTED
 }
 
+// 开始处理新的阶段
 func (v *View) processProposal() Phase {
 	v.prevPrepareSent = v.currPrepareSent
 	v.prevCommitSent = v.currCommitSent
@@ -361,6 +388,7 @@ func (v *View) processProposal() Phase {
 	var prevCommits []*protos.Signature
 
 	var gotPrePrepare bool
+	// 一旦 gotPrePrepare = true 会退出循环
 	for !gotPrePrepare {
 		select {
 		case <-v.abortChan:
@@ -368,6 +396,7 @@ func (v *View) processProposal() Phase {
 		case msg := <-v.incMsgs:
 			v.processMsg(msg.sender, msg.Message)
 		case msg := <-v.prePrepare:
+			// 收到了 prePrepare消息
 			gotPrePrepare = true
 			receivedProposal = msg
 			prePrepare := msg.GetPrePrepare()
@@ -381,8 +410,9 @@ func (v *View) processProposal() Phase {
 			}
 		}
 	}
-
+	// 验证了 PrePare消息
 	requests, err := v.verifyProposal(proposal, prevCommits)
+	// 如果不通过，会调用本视图的Sync方法
 	if err != nil {
 		v.Logger.Warnf("%d received bad proposal from %d: %v", v.SelfID, v.LeaderID, err)
 		v.FailureDetector.Complain(v.Number, false)
@@ -393,13 +423,14 @@ func (v *View) processProposal() Phase {
 
 	v.MetricsView.CountTxsInBatch.Set(float64(len(requests)))
 	v.beginPrePrepare = time.Now()
-
+	// 收到了 prePrePare消息，那么该 发送prepare消息了
 	seq := v.ProposalSequence
 
 	prepareMessage := v.createPrepare(seq, proposal)
 
 	// We are about to send a prepare for a pre-prepare,
 	// so we record the pre-prepare.
+	// 把 该消息 保存到本地中
 	savedMsg := &protos.SavedMessage{
 		Content: &protos.SavedMessage_ProposedRecord{
 			ProposedRecord: &protos.ProposedRecord{
@@ -422,9 +453,12 @@ func (v *View) processProposal() Phase {
 	}
 
 	v.Logger.Infof("Processed proposal with seq %d", seq)
+	// 表示 要进入 PROPOSED 阶段，注意:此时还没有发送prepare消息
 	return PROPOSED
 }
 
+// 创建prepare消息
+// 消息中包含 viewNumber seq 和 pre-prepare 的digest
 func (v *View) createPrepare(seq uint64, proposal types.Proposal) *protos.Message {
 	return &protos.Message{
 		Content: &protos.Message_Prepare{
@@ -437,11 +471,13 @@ func (v *View) createPrepare(seq uint64, proposal types.Proposal) *protos.Messag
 	}
 }
 
+// 处理 prepare消息 处理完成后 进入 prepared 阶段
 func (v *View) processPrepares() Phase {
 	proposal := v.inFlightProposal
 	expectedDigest := proposal.Digest()
 
 	var voterIDs []uint64
+	// 需要等待 quorum个prepare 消息
 	for len(voterIDs) < v.Quorum-1 {
 		select {
 		case <-v.abortChan:
@@ -449,6 +485,7 @@ func (v *View) processPrepares() Phase {
 		case msg := <-v.incMsgs:
 			v.processMsg(msg.sender, msg.Message)
 		case vote := <-v.prepares.votes:
+			// 收到prepare 消息
 			prepare := vote.GetPrepare()
 			if prepare.Digest != expectedDigest {
 				seq := v.ProposalSequence
@@ -465,9 +502,12 @@ func (v *View) processPrepares() Phase {
 	// ID: The integer that represents this node.
 	// Value: The signature, encoded according to the specific signature specification.
 	// Msg: A succinct representation of the proposal that binds this proposal unequivocally.
-
+	// SignProposal返回具有以下3个字段的 types.Signature:
+	//ID: 表示此节点的整数。
+	//Value: 签名，根据特定的签名规范进行编码。
+	//Msg: 提案的简洁表示明确地约束了该提案。
 	// The block proof consists of the aggregation of all these signatures from 2f+1 commits of different nodes.
-
+	// 块证明由来自不同节点的2f+1提交的所有这些签名的聚合组成。
 	prpFrom := &protos.PreparesFrom{
 		Ids: voterIDs,
 	}
@@ -480,7 +520,7 @@ func (v *View) processPrepares() Phase {
 	v.myProposalSig = v.Signer.SignProposal(*proposal, prpFromRaw)
 
 	seq := v.ProposalSequence
-
+	// 构建commit 消息
 	commitMsg := &protos.Message{
 		Content: &protos.Message_Commit{
 			Commit: &protos.Commit{
@@ -495,7 +535,7 @@ func (v *View) processPrepares() Phase {
 			},
 		},
 	}
-
+	// prepared 的证据 就是commit消息
 	preparedProof := &protos.SavedMessage{
 		Content: &protos.SavedMessage_Commit{
 			Commit: commitMsg,
@@ -504,17 +544,19 @@ func (v *View) processPrepares() Phase {
 
 	// We received enough prepares to send a commit.
 	// Save the commit message we are about to send.
+	// 持久化commit消息
 	if err = v.State.Save(preparedProof); err != nil {
 		v.Logger.Panicf("Failed to save message to state, error: %v", err)
 	}
 	v.currCommitSent = proto.Clone(commitMsg).(*protos.Message)
 	v.currCommitSent.GetCommit().Assist = true
 	v.lastBroadcastSent = commitMsg
-
+	// 进入 prepared 阶段，注意：此时commit消息还未发送
 	v.Logger.Infof("Processed prepares for proposal with seq %d", seq)
 	return PREPARED
 }
 
+// 处理commit 消息
 func (v *View) processCommits(proposal *types.Proposal) ([]types.Signature, Phase) {
 	var signatures []types.Signature
 
@@ -534,7 +576,9 @@ func (v *View) processCommits(proposal *types.Proposal) ([]types.Signature, Phas
 		case msg := <-v.incMsgs:
 			v.processMsg(msg.sender, msg.Message)
 		case vote := <-v.commits.votes:
+			// 经过 processMsg 处理后的
 			// Valid votes end up written into the 'validVotes' channel.
+			// 有效投票最终写入 “有效投票” 频道
 			go func(vote *protos.Message) {
 				signatureCollector.verifyVote(vote)
 			}(vote.Message)
@@ -545,12 +589,14 @@ func (v *View) processCommits(proposal *types.Proposal) ([]types.Signature, Phas
 	}
 
 	v.Logger.Infof("%d collected %d commits from %v", v.SelfID, len(signatures), voterIDs)
-
+	// 收集到了足量的commit消息，进入COMMITED状态
 	return signatures, COMMITTED
 }
 
+// 验证 proposal 消息
 func (v *View) verifyProposal(proposal types.Proposal, prevCommits []*protos.Signature) ([]types.RequestInfo, error) {
 	// Verify proposal has correct structure and contains authorized requests.
+	//首先 交给应用层去验证，返回请求者的信息和 请求id
 	requests, err := v.Verifier.VerifyProposal(proposal)
 	if err != nil {
 		v.Logger.Warnf("Received bad proposal: %v", err)
@@ -562,28 +608,28 @@ func (v *View) verifyProposal(proposal types.Proposal, prevCommits []*protos.Sig
 	if err = proto.Unmarshal(proposal.Metadata, md); err != nil {
 		return nil, err
 	}
-
+	// 验证 view
 	if md.ViewId != v.Number {
 		v.Logger.Warnf("Expected view number %d but got %d", v.Number, md.ViewId)
 		return nil, errors.New("invalid view number")
 	}
-
+	// 验证 seq
 	if md.LatestSequence != v.ProposalSequence {
 		v.Logger.Warnf("Expected proposal sequence %d but got %d", v.ProposalSequence, md.LatestSequence)
 		return nil, errors.New("invalid proposal sequence")
 	}
-
+	// 验证 DecisionsInView
 	if md.DecisionsInView != v.DecisionsInView {
 		v.Logger.Warnf("Expected decisions in view %d but got %d", v.DecisionsInView, md.DecisionsInView)
 		return nil, errors.New("invalid decisions in view")
 	}
-
+	// 验证 VerificationSequence
 	expectedSeq := v.Verifier.VerificationSequence()
 	if uint64(proposal.VerificationSequence) != expectedSeq {
 		v.Logger.Warnf("Expected verification sequence %d but got %d", expectedSeq, proposal.VerificationSequence)
 		return nil, errors.New("verification sequence mismatch")
 	}
-
+	// 验证签名，会从本地检查点中 构造出来上一个 commit的 proposal来进行验证签名是否有效
 	prepareAcknowledgements, err := v.verifyPrevCommitSignatures(prevCommits, expectedSeq)
 	if err != nil {
 		return nil, err
@@ -602,7 +648,16 @@ func (v *View) verifyProposal(proposal types.Proposal, prevCommits []*protos.Sig
 	return requests, nil
 }
 
+// verifyPrevCommitSignatures
+//
+//	@Description: 验证 前一个commit的签名
+//	@receiver v
+//	@param prevCommitSignatures
+//	@param currVerificationSeq 当前的验证序列号
+//	@return map[uint64]*protos.PreparesFrom key 是签名者，value 是 附加数据
+//	@return error
 func (v *View) verifyPrevCommitSignatures(prevCommitSignatures []*protos.Signature, currVerificationSeq uint64) (map[uint64]*protos.PreparesFrom, error) {
+	// 从检查点中 取回数据
 	prevPropRaw, _ := v.RetrieveCheckpoint()
 	prevProposalMetadata := &protos.ViewMetadata{}
 	if err := proto.Unmarshal(prevPropRaw.Metadata, prevProposalMetadata); err != nil {
@@ -617,7 +672,7 @@ func (v *View) verifyPrevCommitSignatures(prevCommitSignatures []*protos.Signatu
 	}
 
 	prepareAcknowledgements := make(map[uint64]*protos.PreparesFrom)
-
+	// 检查点中的数据 组装出 上一个commit 的 proposal
 	prevProp := types.Proposal{
 		VerificationSequence: int64(prevPropRaw.VerificationSequence),
 		Metadata:             prevPropRaw.Metadata,
@@ -626,6 +681,7 @@ func (v *View) verifyPrevCommitSignatures(prevCommitSignatures []*protos.Signatu
 	}
 
 	// All previous commit signatures should be verifiable
+	// 检测传入的数据
 	for _, sig := range prevCommitSignatures {
 		aux, err := v.Verifier.VerifyConsenterSig(types.Signature{
 			ID:    sig.Signer,
@@ -714,11 +770,15 @@ func (v *View) verifyBlacklist(prevCommitSignatures []*protos.Signature, currVer
 	return nil
 }
 
+// 处理 当前view 中 seq 前一个的信息
+// 判断如果当前view 保留的prevPrepare、preCommit消息不为空，俺么就给发送者发送一次
 func (v *View) handlePrevSeqMessage(msgProposalSeq, sender uint64, m *protos.Message) {
+	// 如果是PrePrepare 消息，不处理
 	if m.GetPrePrepare() != nil {
 		v.Logger.Warnf("Got pre-prepare for sequence %d but we're in sequence %d", msgProposalSeq, v.ProposalSequence)
 		return
 	}
+	//要么是 prepare 消息， 要么是commit消息
 	msgType := "prepare"
 	if m.GetCommit() != nil {
 		msgType = "commit"
@@ -733,6 +793,7 @@ func (v *View) handlePrevSeqMessage(msgProposalSeq, sender uint64, m *protos.Mes
 			return
 		}
 		if v.prevPrepareSent != nil {
+			// 给发送者 回复一个上个seq的prepare
 			v.Comm.SendConsensus(sender, v.prevPrepareSent)
 			found = true
 		}
@@ -742,6 +803,7 @@ func (v *View) handlePrevSeqMessage(msgProposalSeq, sender uint64, m *protos.Mes
 			return
 		}
 		if v.prevCommitSent != nil {
+			// 给发送者 回复一个上个seq的commit
 			v.Comm.SendConsensus(sender, v.prevCommitSent)
 			found = true
 		}
@@ -754,6 +816,7 @@ func (v *View) handlePrevSeqMessage(msgProposalSeq, sender uint64, m *protos.Mes
 	v.Logger.Debugf("Got %s for previous sequence (%d) from %d, %s", msgType, msgProposalSeq, sender, prevMsgFound)
 }
 
+// 只处理commit消息，其他消息 直接忽略
 func (v *View) discoverIfSyncNeeded(sender uint64, m *protos.Message) {
 	// We're only interested in commit messages.
 	commit := m.GetCommit()
@@ -823,13 +886,14 @@ type voteVerifier struct {
 	validVotes     chan types.Signature
 }
 
+// 验证commit 投票是否有效，如果有效，会方法vv.validVotes channel中
 func (vv *voteVerifier) verifyVote(vote *protos.Message) {
 	commit := vote.GetCommit()
 	if commit.Digest != vv.expectedDigest {
 		vv.v.Logger.Warnf("Got wrong digest at processCommits for seq %d", commit.Seq)
 		return
 	}
-
+	// 验证签名是否有效
 	_, err := vv.v.Verifier.VerifyConsenterSig(types.Signature{
 		ID:    commit.Signature.Signer,
 		Value: commit.Signature.Value,
@@ -947,6 +1011,7 @@ func (v *View) metadataWithUpdatedBlacklist(metadata *protos.ViewMetadata, verif
 }
 
 // Propose broadcasts a prePrepare message with the given proposal
+// 广播 PrePrepare
 func (v *View) Propose(proposal types.Proposal) {
 	_, prevSigs := v.RetrieveCheckpoint()
 
@@ -968,6 +1033,7 @@ func (v *View) Propose(proposal types.Proposal) {
 	}
 	// Send the proposal to yourself in order to pre-prepare yourself and record
 	// it in the WAL before sending it to other nodes.
+	// 将提案发送给自己，以便自己预先准备并在将其发送给其他节点之前将其记录在WAL中。
 	v.HandleMessage(v.LeaderID, msg)
 	v.Logger.Debugf("Proposing proposal sequence %d in view %d", seq, v.Number)
 }

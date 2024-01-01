@@ -55,6 +55,7 @@ type RequestPool interface {
 }
 
 // LeaderMonitor monitors the heartbeat from the current leader
+// 监视当前领导者的心跳
 //
 //go:generate mockery -dir . -name LeaderMonitor -case underscore -output ./mocks/
 type LeaderMonitor interface {
@@ -298,6 +299,7 @@ func (c *Controller) OnAutoRemoveTimeout(requestInfo types.RequestInfo) {
 
 // OnHeartbeatTimeout is called when the heartbeat timeout expires.
 // Called by the HeartbeatMonitor goroutine.
+// 当心跳超时过期时调用OnHeartbeatTimeout。由心跳监视器goroutine调用。
 func (c *Controller) OnHeartbeatTimeout(view uint64, leaderID uint64) {
 	c.Logger.Debugf("Heartbeat timeout expired, reported-view: %d, reported-leader: %d", view, leaderID)
 
@@ -314,6 +316,7 @@ func (c *Controller) OnHeartbeatTimeout(view uint64, leaderID uint64) {
 	}
 
 	c.Logger.Warnf("Heartbeat timeout expired, complaining about leader: %d", leaderID)
+	// 发送complain消息，并且停止当前view
 	c.FailureDetector.Complain(c.getCurrentViewNumber(), true)
 }
 
@@ -372,6 +375,12 @@ func (c *Controller) convertViewMessageToHeartbeat(m *protos.Message) *protos.Me
 	}
 }
 
+// startView
+//
+//	@Description:  启动视图
+//	@receiver c
+//	@param proposalSequence 视图中的 seq
+//	每次都是新建了一个proposer
 func (c *Controller) startView(proposalSequence uint64) {
 	view, initPhase := c.ProposerBuilder.NewProposer(c.leaderID(), proposalSequence, c.currViewNumber, c.currDecisionsInView, c.quorum)
 
@@ -391,6 +400,7 @@ func (c *Controller) startView(proposalSequence uint64) {
 		}
 		role = Leader
 	}
+	// 改变监视器中的角色
 	c.LeaderMonitor.ChangeRole(role, c.currViewNumber, c.leaderID())
 	c.Logger.Infof("Starting view with number %d, sequence %d, and decisions %d", c.currViewNumber, proposalSequence, c.currDecisionsInView)
 }
@@ -531,7 +541,6 @@ func (c *Controller) decide(d decision) {
 	if reconfig.InLatestDecision {
 		c.close()
 	}
-	c.Logger.Debugf("Node %d delivered proposal", c.ID)
 	c.removeDeliveredFromPool(d)
 	select {
 	case c.deliverChan <- struct{}{}:
@@ -557,6 +566,7 @@ func (c *Controller) decide(d decision) {
 	}
 }
 
+// 检测是否需要轮换leader
 func (c *Controller) checkIfRotate(blacklist []uint64) bool {
 	view := c.getCurrentViewNumber()
 	decisionsInView := c.getCurrentDecisionsInView()
@@ -920,6 +930,7 @@ type decision struct {
 }
 
 // BroadcastConsensus broadcasts the message and informs the heartbeat monitor if necessary
+// 广播消息并在必要时通知心跳监视器
 func (c *Controller) BroadcastConsensus(m *protos.Message) {
 	for _, node := range c.NodesList {
 		// Do not send to yourself
@@ -952,6 +963,9 @@ func (med *MutuallyExclusiveDeliver) Deliver(proposal types.Proposal, signature 
 	// If the pending proposal's sequence has already been committed in the past,
 	// do not proceed to commit the proposal, but instead invoke a sync and update the checkpoint once more
 	// to match the sync result.
+	//从最新的检查点获取最新的序列，并将其与即将提交 (挂起) 的提案进行比较。
+	//如果未决提议的序列在过去已经被提交，则不继续提交提议，
+	//而是调用同步并再次更新检查点以匹配同步结果。
 	latest := med.C.latestSeq()
 	if latest != 0 && latest >= pendingProposalMetadata.LatestSequence {
 		med.C.Logger.Infof("Attempted to deliver block %d via view change but meanwhile view change already synced to seq %d, "+
@@ -970,6 +984,7 @@ func (med *MutuallyExclusiveDeliver) Deliver(proposal types.Proposal, signature 
 	med.C.MetricsView.LatencyBatchSave.Observe(time.Since(begin).Seconds())
 
 	// Only set the proposal in case it is later than the already known checkpoint.
+	// 仅在提案新于已知检查点的情况下设置提案。
 	med.C.Checkpoint.Set(proposal, signature)
 
 	return result

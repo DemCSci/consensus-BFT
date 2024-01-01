@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,7 @@ type proposalInfo struct {
 	seq    uint64
 }
 
+// 提取出 viewNumber
 func viewNumber(m *protos.Message) uint64 {
 	if pp := m.GetPrePrepare(); pp != nil {
 		return pp.GetView()
@@ -44,6 +46,7 @@ func viewNumber(m *protos.Message) uint64 {
 	return math.MaxUint64
 }
 
+// 提取出 view中的 seq
 func proposalSequence(m *protos.Message) uint64 {
 	if pp := m.GetPrePrepare(); pp != nil {
 		return pp.Seq
@@ -77,26 +80,25 @@ func MarshalOrPanic(msg proto.Message) []byte {
 }
 
 func getLeaderID(
-	view uint64,
-	n uint64,
-	nodes []uint64,
-	leaderRotation bool,
-	decisionsInView uint64,
-	decisionsPerLeader uint64,
+	view uint64, // 视图编号
+	n uint64, // 节点总数量
+	nodes []uint64, // 节点id
+	leaderRotation bool, // leader 是否轮换
+	decisionsInView uint64, // 当前视图中 已经决定的决策数量
+	decisionsPerLeader uint64, // 每个leader 应该决策多少
 	blacklist []uint64,
 ) uint64 {
 	blackListed := make(map[uint64]struct{})
 	for _, i := range blacklist {
 		blackListed[i] = struct{}{}
 	}
-
+	// 没有开启leader 轮换
 	if !leaderRotation {
 		return nodes[view%n]
 	}
-
 	for i := 0; i < len(nodes); i++ {
 		index := (view + (decisionsInView / decisionsPerLeader)) + uint64(i)
-		node := nodes[index%n]
+		node := nodes[int(index)%len(nodes)]
 		_, exists := blackListed[node]
 		if !exists {
 			return node
@@ -112,11 +114,13 @@ type vote struct {
 }
 
 type voteSet struct {
+	// 验证投票是否有效
 	validVote func(voter uint64, message *protos.Message) bool
-	voted     map[uint64]struct{}
+	voted     map[uint64]struct{} // 用来标识 某个节点是否已经投票
 	votes     chan *vote
 }
 
+// 清空投票集合，n表示重新开的投票集合大小
 func (vs *voteSet) clear(n uint64) {
 	// Drain the votes channel
 	for len(vs.votes) > 0 {
@@ -127,6 +131,7 @@ func (vs *voteSet) clear(n uint64) {
 	vs.votes = make(chan *vote, n)
 }
 
+// 验证 投票是否有效，并保存到投票集合中 向 channel 发送了消息
 func (vs *voteSet) registerVote(voter uint64, message *protos.Message) {
 	if !vs.validVote(voter, message) {
 		return
@@ -254,6 +259,7 @@ func (ifp *InFlightData) clear() {
 }
 
 // ProposalMaker implements ProposerBuilder
+// ProposerBuilder 实现者
 type ProposalMaker struct {
 	DecisionsPerLeader uint64
 	N                  uint64
@@ -276,6 +282,17 @@ type ProposalMaker struct {
 }
 
 // NewProposer returns a new view
+// 返回一个新视图 Proposer 是view 的接口
+//
+//	@Description:
+//	@receiver pm
+//	@param leader 新视图的 leader
+//	@param proposalSequence 新视图的 seq
+//	@param viewNum 新视图的 viewNum
+//	@param decisionsInView
+//	@param quorumSize
+//	@return proposer
+//	@return phase
 func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decisionsInView uint64, quorumSize int) (proposer Proposer, phase Phase) {
 	view := &View{
 		RetrieveCheckpoint: pm.Checkpoint.Get,
@@ -313,7 +330,8 @@ func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decision
 			pm.Logger.Panicf("Failed restoring view from WAL: %v", err)
 		}
 	})
-
+	// 判断从WAL 恢复出来的 view 和seq 与当前 view seq的关系
+	// 取最新的
 	if proposalSequence > view.ProposalSequence {
 		view.ProposalSequence = proposalSequence
 		view.DecisionsInView = decisionsInView
@@ -334,6 +352,7 @@ func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decision
 }
 
 // ViewSequence indicates if a view is currently active and its current proposal sequence
+// 如果视图当前处于活动状态且其当前proposal sequence
 type ViewSequence struct {
 	ViewActive  bool
 	ProposalSeq uint64
@@ -590,4 +609,74 @@ type IntDoubleByte struct {
 
 type IntDoubleBytes struct {
 	A []IntDoubleByte
+}
+
+func PrettyStruct(i interface{}) string {
+	params := Flatten(i)
+	var buffer bytes.Buffer
+	for i := range params {
+		buffer.WriteString("\n\t")
+		buffer.WriteString(params[i])
+	}
+	return buffer.String()
+}
+
+// Flatten performs a depth-first serialization of a struct to a slice of
+// strings. Each string will be formatted at 'path.to.leaf = value'.
+func Flatten(i interface{}) []string {
+	var res []string
+	flatten("", &res, reflect.ValueOf(i))
+	return res
+}
+
+// flatten recursively retrieves every leaf node in a struct in depth-first fashion
+// and aggregate the results into given string slice with format: "path.to.leaf = value"
+// in the order of definition. Root name is ignored in the path. This helper function is
+// useful to pretty-print a struct, such as configs.
+// for example, given data structure:
+//
+//	A{
+//	  B{
+//	    C: "foo",
+//	    D: 42,
+//	  },
+//	  E: nil,
+//	}
+//
+// it should yield a slice of string containing following items:
+// [
+//
+//	"B.C = \"foo\"",
+//	"B.D = 42",
+//	"E =",
+//
+// ]
+func flatten(k string, m *[]string, v reflect.Value) {
+	delimiter := "."
+	if k == "" {
+		delimiter = ""
+	}
+
+	switch v.Kind() {
+	case reflect.Ptr:
+		if v.IsNil() {
+			*m = append(*m, fmt.Sprintf("%s =", k))
+			return
+		}
+		flatten(k, m, v.Elem())
+	case reflect.Struct:
+		if x, ok := v.Interface().(fmt.Stringer); ok {
+			*m = append(*m, fmt.Sprintf("%s = %v", k, x))
+			return
+		}
+
+		for i := 0; i < v.NumField(); i++ {
+			flatten(k+delimiter+v.Type().Field(i).Name, m, v.Field(i))
+		}
+	case reflect.String:
+		// It is useful to quote string values
+		*m = append(*m, fmt.Sprintf("%s = \"%s\"", k, v))
+	default:
+		*m = append(*m, fmt.Sprintf("%s = %v", k, v))
+	}
 }

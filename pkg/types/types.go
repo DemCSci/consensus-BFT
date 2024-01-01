@@ -68,12 +68,14 @@ func computeDigest(rawBytes []byte) string {
 	return hex.EncodeToString(digest)
 }
 
+// 就记录了一条
 type Checkpoint struct {
 	lock       sync.RWMutex
 	proposal   Proposal
 	signatures []Signature
 }
 
+// 返回 proposal 以及对应的签名
 func (c *Checkpoint) Get() (*smartbftprotos.Proposal, []*smartbftprotos.Signature) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
@@ -96,6 +98,7 @@ func (c *Checkpoint) Get() (*smartbftprotos.Proposal, []*smartbftprotos.Signatur
 	return p, signatures
 }
 
+// 设置检查点
 func (c *Checkpoint) Set(proposal Proposal, signatures []Signature) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
@@ -119,4 +122,67 @@ type ReconfigSync struct {
 	InReplicatedDecisions bool
 	CurrentNodes          []uint64
 	CurrentConfig         Configuration
+}
+
+type Block struct {
+	Sequence     uint64
+	PrevHash     string
+	Transactions []Transaction
+}
+
+type BlockHeader struct {
+	Sequence int64
+	PrevHash string
+	DataHash string
+}
+
+func (header BlockHeader) ToBytes() []byte {
+	rawHeader, err := asn1.Marshal(header)
+	if err != nil {
+		panic(err)
+	}
+	return rawHeader
+}
+
+func BlockHeaderFromBytes(rawHeader []byte) *BlockHeader {
+	var header BlockHeader
+	asn1.Unmarshal(rawHeader, &header)
+	return &header
+}
+
+type Transaction struct {
+	ClientID string
+	ID       string
+}
+
+func (txn Transaction) ToBytes() []byte {
+	rawTxn, err := asn1.Marshal(txn)
+	if err != nil {
+		panic(err)
+	}
+	return rawTxn
+}
+
+func TransactionFromBytes(rawTxn []byte) *Transaction {
+	var txn Transaction
+	asn1.Unmarshal(rawTxn, &txn)
+	return &txn
+}
+
+type BlockData struct {
+	Transactions [][]byte
+}
+
+func (b BlockData) ToBytes() []byte {
+	rawBlock, err := asn1.Marshal(b)
+	if err != nil {
+		panic(err)
+	}
+	return rawBlock
+}
+
+func BlockDataFromBytes(rawBlock []byte) *BlockData {
+	var block BlockData
+	asn1.Unmarshal(rawBlock, &block)
+	return &block
 }

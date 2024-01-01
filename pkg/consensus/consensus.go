@@ -72,6 +72,7 @@ func (c *Consensus) Complain(viewNum uint64, stopView bool) {
 	c.viewChanger.StartViewChange(viewNum, stopView)
 }
 
+// 这个重要
 func (c *Consensus) Deliver(proposal types.Proposal, signatures []types.Signature) types.Reconfig {
 	reconfig := c.Application.Deliver(proposal, signatures)
 	if reconfig.InLatestDecision {
@@ -108,6 +109,8 @@ func (c *Consensus) Start() error {
 	if err := c.ValidateConfiguration(c.Comm.Nodes()); err != nil {
 		return errors.Wrapf(err, "configuration is invalid")
 	}
+	//// 输出当前的配置
+	//c.Logger.Infof("共识开始Start(),当前节点的配置\n%s\n", algorithm.PrettyStruct(c.Config))
 
 	if c.Metrics == nil {
 		c.Metrics = bft.NewMetrics(&disabled.Provider{})
@@ -219,7 +222,6 @@ func (c *Consensus) reconfig(reconfig types.Reconfig) {
 	old := c.nodes
 	c.setNodes(reconfig.CurrentNodes)
 	c.initMetricsBlacklistReconfigure(old)
-
 	c.createComponents()
 	opts := algorithm.PoolOptions{
 		ForwardTimeout:    c.Config.RequestForwardTimeout,
@@ -315,6 +317,7 @@ func (c *Consensus) SubmitRequest(req []byte) error {
 	return c.controller.SubmitRequest(req)
 }
 
+// 返回了一个 proposal 构建者
 func (c *Consensus) proposalMaker() *algorithm.ProposalMaker {
 	return &algorithm.ProposalMaker{
 		DecisionsPerLeader: c.Config.DecisionsPerLeader,
@@ -447,6 +450,7 @@ func (c *Consensus) createComponents() {
 	c.controller.ProposerBuilder = c.proposalMaker()
 }
 
+// 主要是创建了 batchBuilder 和 leaderMonitor 组件
 func (c *Consensus) continueCreateComponents() {
 	batchBuilder := algorithm.NewBatchBuilder(c.Pool, c.submittedChan, c.Config.RequestBatchMaxCount, c.Config.RequestBatchMaxBytes, c.Config.RequestBatchMaxInterval)
 	leaderMonitor := algorithm.NewHeartbeatMonitor(c.Scheduler, c.Logger, c.Config.LeaderHeartbeatTimeout, c.Config.LeaderHeartbeatCount, c.controller, c.numberOfNodes, c.controller, c.controller.ViewSequences, c.Config.NumOfTicksBehindBeforeSyncing)
