@@ -127,3 +127,24 @@ message StateTransferResponse {
     uint64 view_num = 1;
     uint64 sequence = 2;
 }
+
+message FwdMessage {
+    uint64 sender = 1;
+    bytes payload = 2;
+}
+
+message Request {
+    uint64 id = 1;
+    oneof body {
+        Message message = 2;
+        FwdMessage fwd_message = 3;
+    }
+}
+message Response {
+    int32 code = 1;
+    string data = 2;
+}
+
+service CommService {
+    rpc communication(Request) returns(Response);
+}

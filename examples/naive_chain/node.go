@@ -6,9 +6,16 @@
 package naive
 
 import (
+	"context"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
+	"log"
+	"net"
 	"path/filepath"
 	"sync"
 	"time"
@@ -21,15 +28,75 @@ import (
 	"github.com/golang/protobuf/proto"
 )
 
-type (
-	Ingress map[int]<-chan proto.Message
-	Egress  map[int]chan<- proto.Message
-)
+type Block struct {
+	Sequence     uint64
+	PrevHash     string
+	Transactions []Transaction
+}
+
+type BlockHeader struct {
+	Sequence int64
+	PrevHash string
+	DataHash string
+}
+
+func (header BlockHeader) ToBytes() []byte {
+	rawHeader, err := asn1.Marshal(header)
+	if err != nil {
+		panic(err)
+	}
+	return rawHeader
+}
+
+func BlockHeaderFromBytes(rawHeader []byte) *BlockHeader {
+	var header BlockHeader
+	asn1.Unmarshal(rawHeader, &header)
+	return &header
+}
+
+type Transaction struct {
+	ClientID string
+	ID       string
+}
+
+func (txn Transaction) ToBytes() []byte {
+	rawTxn, err := asn1.Marshal(txn)
+	if err != nil {
+		panic(err)
+	}
+	return rawTxn
+}
+
+func TransactionFromBytes(rawTxn []byte) *Transaction {
+	var txn Transaction
+	asn1.Unmarshal(rawTxn, &txn)
+	return &txn
+}
+
+type BlockData struct {
+	Transactions [][]byte
+}
+
+func (b BlockData) ToBytes() []byte {
+	rawBlock, err := asn1.Marshal(b)
+	if err != nil {
+		panic(err)
+	}
+	return rawBlock
+}
+
+func BlockDataFromBytes(rawBlock []byte) *BlockData {
+	var block BlockData
+	asn1.Unmarshal(rawBlock, &block)
+	return &block
+}
 
 type NetworkOptions struct {
 	NumNodes     int
 	BatchSize    uint64
 	BatchTimeout time.Duration
+	LocalAddress string
+	Id2Address   map[uint64]string
 }
 
 type Node struct {
@@ -39,10 +106,9 @@ type Node struct {
 	doneWG      sync.WaitGroup
 	prevHash    string
 	id          uint64
-	in          Ingress
-	out         Egress
 	deliverChan chan<- *Block
-	consensus   *smartbft.Consensus
+	Consensus   *smartbft.Consensus
+	comm        *CommService
 }
 
 func (*Node) Sync() bft.SyncResponse {
@@ -127,15 +193,17 @@ func (n *Node) AssembleProposal(metadata []byte, requests [][]byte) bft.Proposal
 }
 
 func (n *Node) SendConsensus(targetID uint64, message *smartbftprotos.Message) {
-	n.out[int(targetID)] <- message
+	//n.out[int(targetID)] <- message
+	n.comm.sendConsensus(targetID, message)
 }
 
 func (n *Node) SendTransaction(targetID uint64, request []byte) {
-	msg := &FwdMessage{
+	msg := &smartbftprotos.FwdMessage{
 		Payload: request,
 		Sender:  n.id,
 	}
-	n.out[int(targetID)] <- msg
+	//n.out[int(targetID)] <- msg
+	n.comm.sendTransaction(targetID, msg)
 }
 
 func (n *Node) MembershipChange() bool {
@@ -167,7 +235,7 @@ func (n *Node) Deliver(proposal bft.Proposal, signature []bft.Signature) bft.Rec
 	return bft.Reconfig{InLatestDecision: false}
 }
 
-func NewNode(id uint64, in Ingress, out Egress, deliverChan chan<- *Block, logger smart.Logger, walmet *wal.Metrics, bftmet *smart.Metrics, opts NetworkOptions, testDir string) *Node {
+func NewNode(id uint64, deliverChan chan<- *Block, logger smart.Logger, walmet *wal.Metrics, bftmet *smart.Metrics, opts NetworkOptions, testDir string) *Node {
 	nodeDir := filepath.Join(testDir, fmt.Sprintf("node%d", id))
 
 	writeAheadLog, err := wal.Create(logger, nodeDir, &wal.Options{Metrics: walmet.With("label1", "val1")})
@@ -175,22 +243,30 @@ func NewNode(id uint64, in Ingress, out Egress, deliverChan chan<- *Block, logge
 		logger.Panicf("Cannot create WAL at %s", nodeDir)
 	}
 
+	comm := &CommService{
+		UnimplementedCommServiceServer: smartbftprotos.UnimplementedCommServiceServer{},
+		in:                             make(map[uint64]chan proto.Message),
+		out:                            nil,
+		networkoptions:                 &opts,
+	}
+	for k, _ := range opts.Id2Address {
+		comm.in[k] = make(chan proto.Message)
+	}
 	node := &Node{
 		clock:       time.NewTicker(time.Second),
 		secondClock: time.NewTicker(time.Second),
 		id:          id,
-		in:          in,
-		out:         out,
+		comm:        comm,
 		deliverChan: deliverChan,
 		stopChan:    make(chan struct{}),
 	}
-
+	comm.node = node
 	config := bft.DefaultConfig
 	config.SelfID = id
 	config.RequestBatchMaxInterval = opts.BatchTimeout
 	config.RequestBatchMaxCount = opts.BatchSize
 
-	node.consensus = &smartbft.Consensus{
+	node.Consensus = &smartbft.Consensus{
 		Config:             config,
 		ViewChangerTicker:  node.secondClock.C,
 		Scheduler:          node.clock.C,
@@ -210,15 +286,19 @@ func NewNode(id uint64, in Ingress, out Egress, deliverChan chan<- *Block, logge
 			ViewId:         0,
 		},
 	}
-	if err = node.consensus.Start(); err != nil {
+	if err = node.Consensus.Start(); err != nil {
 		panic("error on consensus start")
 	}
 	node.Start()
+	// 启动服务
+	go func() {
+		node.comm.server(opts.LocalAddress)
+	}()
 	return node
 }
 
 func (n *Node) Start() {
-	for id, in := range n.in {
+	for id, in := range n.comm.in {
 		if uint64(id) == n.id {
 			continue
 		}
@@ -234,9 +314,9 @@ func (n *Node) Start() {
 				case msg := <-in:
 					switch m := msg.(type) {
 					case *smartbftprotos.Message:
-						n.consensus.HandleMessage(id, m)
-					case *FwdMessage:
-						n.consensus.SubmitRequest(m.Payload)
+						n.Consensus.HandleMessage(id, m)
+					case *smartbftprotos.FwdMessage:
+						n.Consensus.SubmitRequest(m.Payload)
 					}
 				}
 			}
@@ -253,13 +333,13 @@ func (n *Node) Stop() {
 	}
 	n.clock.Stop()
 	n.doneWG.Wait()
-	n.consensus.Stop()
+	n.Consensus.Stop()
 }
 
 func (n *Node) Nodes() []uint64 {
-	nodes := make([]uint64, 0, len(n.in))
-	for id := range n.in {
-		nodes = append(nodes, uint64(id))
+	nodes := make([]uint64, 0, len(n.comm.in))
+	for id := range n.comm.in {
+		nodes = append(nodes, id)
 	}
 
 	return nodes
@@ -270,4 +350,101 @@ func computeDigest(rawBytes []byte) string {
 	h.Write(rawBytes)
 	digest := h.Sum(nil)
 	return hex.EncodeToString(digest)
+}
+
+// grpc 通讯系统
+type CommService struct {
+	smartbftprotos.UnimplementedCommServiceServer
+	networkoptions *NetworkOptions
+	in             map[uint64]chan proto.Message
+	out            chan proto.Message
+	node           *Node
+}
+
+// grpc 服务端收到了消息
+func (c *CommService) Communication(ctx context.Context, in *smartbftprotos.Request) (*smartbftprotos.Response, error) {
+	_, ok := peer.FromContext(ctx)
+	if !ok {
+		fmt.Println("提取发送者信息错误")
+		return nil, nil
+	}
+	message := in.GetMessage()
+	if message != nil {
+		c.in[in.GetId()] <- message
+	} else {
+		message2 := in.GetFwdMessage()
+		if message2 != nil {
+			c.in[in.GetId()] <- message2
+		}
+	}
+	return &smartbftprotos.Response{
+		Code: 200,
+		Data: "",
+	}, nil
+}
+
+func (c *CommService) server(localAddress string) {
+
+	listener, err := net.Listen("tcp", localAddress)
+	if err != nil {
+		log.Fatalf("net.Listen err: %v", err)
+	}
+	log.Println(localAddress + " net.Listing...")
+	// 新建gRPC服务器实例
+	grpcServer := grpc.NewServer()
+	smartbftprotos.RegisterCommServiceServer(grpcServer, c)
+	//用服务器 Serve() 方法以及我们的端口信息区实现阻塞等待，直到进程被杀死或者 Stop() 被调用
+	err = grpcServer.Serve(listener)
+	if err != nil {
+		log.Fatalf("grpcServer.Serve err: %v", err)
+	}
+	fmt.Println("不应该到这里")
+}
+
+func (c *CommService) sendConsensus(id uint64, message *smartbftprotos.Message) {
+	targetAddress := c.networkoptions.Id2Address[id]
+	// 连接服务器
+	conn, err := grpc.Dial(targetAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("net.Connect err: %v", err)
+	}
+	defer conn.Close()
+	// 建立gRPC连接
+	client := smartbftprotos.NewCommServiceClient(conn)
+	// 初始化上下文，设置请求超时时间为1秒
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	request := &smartbftprotos.Request{
+		Id:   c.node.id,
+		Body: &smartbftprotos.Request_Message{Message: message},
+	}
+
+	_, err = client.Communication(ctx, request)
+	if err != nil {
+		fmt.Printf("与%d 节点通信错误， err= %v \n", id, err)
+	}
+}
+
+func (c *CommService) sendTransaction(id uint64, message *smartbftprotos.FwdMessage) {
+	targetAddress := c.networkoptions.Id2Address[id]
+	// 连接服务器
+	conn, err := grpc.Dial(targetAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Fatalf("net.Connect err: %v", err)
+	}
+	defer conn.Close()
+	// 建立gRPC连接
+	client := smartbftprotos.NewCommServiceClient(conn)
+	// 初始化上下文，设置请求超时时间为1秒
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	request := &smartbftprotos.Request{
+		Id:   c.node.id,
+		Body: &smartbftprotos.Request_FwdMessage{FwdMessage: message},
+	}
+	_, err = client.Communication(ctx, request)
+	if err != nil {
+		fmt.Printf("与%d 节点通信错误， err= %\n", err)
+	}
 }
