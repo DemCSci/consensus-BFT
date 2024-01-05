@@ -68,6 +68,7 @@ type LeaderMonitor interface {
 }
 
 // Proposer proposes a new proposal to be agreed on
+// 提出一项有待商定的新提案
 type Proposer interface {
 	Propose(proposal types.Proposal)
 	Start()
@@ -86,6 +87,7 @@ type ProposerBuilder interface {
 }
 
 // Controller controls the entire flow of the consensus
+// Controller 持有ViewChanger , ViewChanger 持有 view
 type Controller struct {
 	api.Comm
 	// configuration
@@ -116,7 +118,7 @@ type Controller struct {
 	MetricsView        *api.MetricsView
 	quorum             int
 
-	currView Proposer
+	currView Proposer // controller 持有的当前视图
 
 	currViewLock   sync.RWMutex
 	currViewNumber uint64
@@ -321,6 +323,7 @@ func (c *Controller) OnHeartbeatTimeout(view uint64, leaderID uint64) {
 }
 
 // ProcessMessages dispatches the incoming message to the required component
+// 将传入消息调度到所需的组件
 func (c *Controller) ProcessMessages(sender uint64, m *protos.Message) {
 	c.Logger.Debugf("%d got message from %d: %s", c.ID, sender, MsgToString(m))
 	switch m.GetContent().(type) {
@@ -473,6 +476,7 @@ func (c *Controller) AbortView(view uint64) {
 }
 
 // ViewChanged makes the controller abort the current view and start a new one with the given numbers
+// 使控制器中止当前视图并使用给定的数字开始一个新视图
 func (c *Controller) ViewChanged(newViewNumber uint64, newProposalSequence uint64) {
 	c.Logger.Debugf("ViewChanged, the new view is %d", newViewNumber)
 	amILeader, _ := c.iAmTheLeader()
@@ -491,11 +495,13 @@ func (c *Controller) propose() {
 		c.acquireLeaderToken() // try again later
 		return
 	}
+	// 视图的元数据
 	metadata := c.currView.GetMetadata()
 	proposal := c.Assembler.AssembleProposal(metadata, nextBatch)
 	c.currView.Propose(proposal)
 }
 
+// controller层的事件循环
 func (c *Controller) run() {
 	// At exit, always make sure to kill current view
 	// and wait for it to finish.
@@ -516,6 +522,7 @@ func (c *Controller) run() {
 		case <-c.stopChan:
 			return
 		case <-c.leaderToken:
+			// 只有是leader, 才能提出proposal
 			c.propose()
 		case <-c.syncChan:
 			c.Logger.Debugf("get msg from syncChan")
@@ -537,16 +544,19 @@ func (c *Controller) run() {
 
 func (c *Controller) decide(d decision) {
 	c.Logger.Debugf("Delivering to app from Controller decide the last decision proposal")
+	// 投递到应用层，并返回
 	reconfig := c.Deliver.Deliver(d.proposal, d.signatures)
 	if reconfig.InLatestDecision {
 		c.close()
 	}
 	c.removeDeliveredFromPool(d)
+	// 告诉controller层, 已经将decision 交给了应用层，可以解除阻塞了
 	select {
 	case c.deliverChan <- struct{}{}:
 	case <-c.stopChan:
 		return
 	}
+	// c的该字段进行了++
 	c.incrementCurrentDecisionsInView()
 
 	md := &protos.ViewMetadata{}
@@ -561,7 +571,9 @@ func (c *Controller) decide(d decision) {
 		c.RequestPool.RestartTimers()
 	}
 	c.MaybePruneRevokedRequests()
+	// 每次decide 一个区块，就判断自己是否leader
 	if iAm, _ := c.iAmTheLeader(); iAm {
+		// 如果是leader，投递消息
 		c.acquireLeaderToken()
 	}
 }
@@ -766,6 +778,7 @@ func (c *Controller) MaybePruneRevokedRequests() {
 	})
 }
 
+// 向leaderToken channel 投递了消息
 func (c *Controller) acquireLeaderToken() {
 	select {
 	case c.leaderToken <- struct{}{}:
@@ -905,6 +918,7 @@ func (c *Controller) Decide(proposal types.Proposal, signatures []types.Signatur
 	}
 
 	select {
+	// 等待将决策交付给应用程序
 	case <-c.deliverChan: // wait for the delivery of the decision to the application
 	case <-c.stopChan: // If we stopped the controller, abort delivery
 	}

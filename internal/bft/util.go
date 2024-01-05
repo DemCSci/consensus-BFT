@@ -163,6 +163,7 @@ func (nv *nextViews) registerNext(next uint64, sender uint64) {
 	nv.n[sender] = next
 }
 
+// 判断sender 发送的 view编号为next的 viewChange 消息是否已经收到
 func (nv *nextViews) sendRecv(next uint64, sender uint64) bool {
 	return next == nv.n[sender]
 }
@@ -193,6 +194,7 @@ func computeQuorum(n uint64) (q int, f int) {
 
 // InFlightData records proposals that are in-flight,
 // as well as their corresponding prepares.
+// 记录正在进行中的提案及其相应的准备工作。
 type InFlightData struct {
 	lock sync.RWMutex
 	v    *inFlightProposalData
@@ -204,6 +206,7 @@ type inFlightProposalData struct {
 }
 
 // InFlightProposal returns an in-flight proposal or nil if there is no such.
+// 返回一个正在进行的提案，如果没有，则返回 nil。
 func (ifp *InFlightData) InFlightProposal() *types.Proposal {
 	ifp.lock.RLock()
 	defer ifp.lock.RUnlock()
@@ -216,6 +219,7 @@ func (ifp *InFlightData) InFlightProposal() *types.Proposal {
 }
 
 // IsInFlightPrepared returns true if the in-flight proposal is prepared.
+// 如果正在进行的提案是否是prepared状态，则返回 true
 func (ifp *InFlightData) IsInFlightPrepared() bool {
 	ifp.lock.RLock()
 	defer ifp.lock.RUnlock()
@@ -447,36 +451,44 @@ type blacklist struct {
 	logger             api.Logger
 	metricsBlacklist   *api.MetricsBlacklist
 	f                  int
-	decisionsPerLeader uint64
+	decisionsPerLeader uint64 // 如果 > 0 那么leaderRotation 为true
 }
 
 func (bl blacklist) computeUpdate() []uint64 {
 	newBlacklist := bl.prevMD.BlackList
+	// 上一个proposal 的视图编号
 	viewBeforeViewChanges := bl.prevMD.ViewId
 
 	bl.logger.Debugf("view before: %d, current view: %d", viewBeforeViewChanges, bl.currView)
 
 	// In case the previous view is different from this view, then we had a view change.
 	// Thus, we need to add some nodes to the blacklist.
+	// 如果以前的视图与这个视图不同，那么我们有一个视图更改。因此，我们需要将一些节点添加到黑名单中。
 	if viewBeforeViewChanges != bl.currView {
 		// If we are in the first proposal, then the leader ID of the previous view is not computed with an offset.
 		// However, if we are in any subsequent proposal, then the previous leader's ID was computed by adding 1 to the
 		// latest decisions in view that was committed.
+		// 如果我们在第一个提案中，则前一个视图的leader ID 不会使用偏移量进行计算。
+		// 但是，如果我们在任何后续提案中， 则前一个leader的 ID 是通过在已提交的视图中的最新决策中加 1 来计算的。
 		offset := uint64(1)
 		if bl.prevMD.LatestSequence == 0 {
 			offset = 0
 		}
 
 		// Locate every leader of all views previous to this views.
+		// 找到此视图之前的每个视图的leader
 		for viewPreviousToThisView := viewBeforeViewChanges; viewPreviousToThisView < bl.currView; viewPreviousToThisView++ {
 			bl.logger.Debugf("viewPreviousToThisView: %d, N: %d, Nodes: %v, rotation: %v, decisions in view: %d, decisions per leader: %d, blacklist: %v",
 				viewPreviousToThisView, bl.n, bl.nodes, bl.leaderRotation, bl.prevMD.DecisionsInView, bl.decisionsPerLeader, bl.prevMD.BlackList)
+			// offset 用在了这里， 这里放入的黑名单，也是前一个view的黑名单
 			leaderID := getLeaderID(viewPreviousToThisView, bl.n, bl.nodes, bl.leaderRotation, bl.prevMD.DecisionsInView+offset, bl.decisionsPerLeader, bl.prevMD.BlackList)
+			// leader 没有更换
 			if leaderID == bl.currentLeader {
 				bl.logger.Debugf("Skipping blacklisting current node (%d)", leaderID)
 				continue
 			}
 			// Add that leader to the blacklist, because it did not drive any proposal, hence we skipped it because of view changes.
+			// 将该领导者添加到黑名单中，因为它没有推动任何提案，因此我们由于视图更改而跳过了它
 			newBlacklist = append(newBlacklist, leaderID)
 			bl.logger.Infof("Blacklisting %d", leaderID)
 		}
@@ -485,10 +497,13 @@ func (bl blacklist) computeUpdate() []uint64 {
 		// because they helped us drive from the previous sequence to this sequence.
 		// Compute the new blacklist according to your collected attestations on prepares sent
 		// in previous round.
+		// 我们处于相同的视图中，因此如果适用的话，我们可以从黑名单中删除一些节点，
+		// 因为它们帮助我们从前一个序列驱动到这个序列。根据您收集的上一轮发送的准备证明计算新的黑名单。
 		newBlacklist = pruneBlacklist(newBlacklist, bl.preparesFrom, bl.f, bl.nodes, bl.logger)
 	}
 
 	// If blacklist is too big, remove items from its beginning
+	// 黑名单太大了，那么就删除一个
 	for len(newBlacklist) > bl.f {
 		bl.logger.Infof("Removing %d from %d sized blacklist due to size constraint", newBlacklist[0], len(newBlacklist))
 		newBlacklist = newBlacklist[1:]
@@ -498,6 +513,7 @@ func (bl blacklist) computeUpdate() []uint64 {
 		bl.logger.Infof("Blacklist changed: %v --> %v", bl.prevMD.BlackList, newBlacklist)
 	}
 
+	// metric 使用 不用管
 	newBlacklistMap := make(map[uint64]bool, len(newBlacklist))
 	for _, node := range newBlacklist {
 		newBlacklistMap[node] = true
@@ -523,6 +539,9 @@ func btoi(b bool) float64 {
 // pruneBlacklist receives the previous blacklist, prepare acknowledgements from nodes, and returns
 // the new blacklist such that a node that was observed by more than f observers is removed from the blacklist,
 // and all nodes that no longer exist are also removed from the blacklist.
+// pruneBlacklist 接收先前的黑名单，prepare acknowledgements from nodes，并返回新的黑名单，
+// 以便将超过 f 个观察者观察到的节点从黑名单中删除，并且所有不再存在的节点也从黑名单中删除。
+// 对 prevBlacklist 做了减少，没有任何的增加
 func pruneBlacklist(prevBlacklist []uint64, preparesFrom map[uint64]*protos.PreparesFrom, f int, nodes []uint64, logger api.Logger) []uint64 {
 	if len(prevBlacklist) == 0 {
 		logger.Debugf("Blacklist empty, nothing to prune")
@@ -536,6 +555,7 @@ func pruneBlacklist(prevBlacklist []uint64, preparesFrom map[uint64]*protos.Prep
 	}
 
 	// For each sender of a prepare, count the number of commit signatures which acknowledge receiving a prepare from it.
+	// 对于prepare的每个发送者，计算commit signatures
 	nodeID2Acks := make(map[uint64]int)
 	for from, gotPrepareFrom := range preparesFrom {
 		logger.Debugf("%d observed prepares from %v", from, gotPrepareFrom)
@@ -543,8 +563,9 @@ func pruneBlacklist(prevBlacklist []uint64, preparesFrom map[uint64]*protos.Prep
 			nodeID2Acks[prepareSender]++
 		}
 	}
-
+	// 构建新的黑名单
 	var newBlackList []uint64
+	// 遍历旧的黑名单每一个节点
 	for _, blackListedNode := range prevBlacklist {
 		// Purge nodes that were removed by a reconfiguration
 		if _, exists := currentNodeIDs[blackListedNode]; !exists {
@@ -553,6 +574,7 @@ func pruneBlacklist(prevBlacklist []uint64, preparesFrom map[uint64]*protos.Prep
 		}
 
 		// Purge nodes that have enough attestations of being alive
+		// 清除有足够活着证明的节点
 		observers := nodeID2Acks[blackListedNode]
 		if observers > f {
 			logger.Infof("Node %d was observed sending a prepare by %d nodes, removing it from blacklist", blackListedNode, observers)

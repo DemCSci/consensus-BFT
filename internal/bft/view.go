@@ -75,8 +75,8 @@ type View struct {
 	N                  uint64 // 节点数量
 	LeaderID           uint64
 	Quorum             int
-	Number             uint64 // view 编号
-	Decider            Decider
+	Number             uint64  // view 编号
+	Decider            Decider // View 的 Decider  就是controller
 	FailureDetector    FailureDetector
 	Sync               Synchronizer
 	Logger             api.Logger
@@ -86,8 +86,8 @@ type View struct {
 	MembershipNotifier api.MembershipNotifier
 	ProposalSequence   uint64
 	DecisionsInView    uint64
-	State              State
-	Phase              Phase
+	State              State // 状态存储
+	Phase              Phase // 所处的阶段
 	InMsgQSize         int
 	// Runtime
 	lastVotedProposalByID map[uint64]*protos.Commit
@@ -106,11 +106,11 @@ type View struct {
 	prevPrepareSent *protos.Message
 	prevCommitSent  *protos.Message
 	// Current proposal
-	prePrepare chan *protos.Message
+	prePrepare chan *protos.Message // 一般channel 中都是只有1个元素
 	prepares   *voteSet
 	commits    *voteSet
 	// Next proposal
-	nextPrePrepare chan *protos.Message
+	nextPrePrepare chan *protos.Message // 一般channel 中都是只有1个元素
 	nextPrepares   *voteSet
 	nextCommits    *voteSet
 
@@ -275,6 +275,7 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 // 事件循环机制
 func (v *View) run() {
 	defer v.viewEnded.Done()
+	//view停止的时候，将seq进行持久化
 	defer func() {
 		v.ViewSequences.Store(ViewSequence{
 			ProposalSeq: v.ProposalSequence,
@@ -911,16 +912,21 @@ func (vv *voteVerifier) verifyVote(vote *protos.Message) {
 	}
 }
 
+// decide 一个提案
 func (v *View) decide(proposal *types.Proposal, signatures []types.Signature, requests []types.RequestInfo) {
 	v.Logger.Infof("Deciding on seq %d", v.ProposalSequence)
+	// 存储起来 view seq
 	v.ViewSequences.Store(ViewSequence{ProposalSeq: v.ProposalSequence, ViewActive: true})
 	// first make preparations for the next sequence so that the view will be ready to continue right after delivery
+	// 首先为下一个序列做准备，以便视图在交付后立即准备继续
 	v.startNextSeq()
 	signatures = append(signatures, *v.myProposalSig)
 	v.Decider.Decide(*proposal, signatures, requests)
 }
 
+// v 的 seq 和 DecisionsInView 进行了++ swap next prePrepare
 func (v *View) startNextSeq() {
+	// 前一个seq
 	prevSeq := v.ProposalSequence
 
 	v.ProposalSequence++
@@ -944,19 +950,20 @@ func (v *View) startNextSeq() {
 	v.nextPrePrepare = tmp
 
 	// swap next prepares
-	tmpVotes := v.prepares
+	tmpVotes := v.prepares // prepare的投票
 	v.prepares = v.nextPrepares
 	tmpVotes.clear(v.N)
 	v.nextPrepares = tmpVotes
 
 	// swap next commits
-	tmpVotes = v.commits
+	tmpVotes = v.commits // commit的投票
 	v.commits = v.nextCommits
 	tmpVotes.clear(v.N)
 	v.nextCommits = tmpVotes
 }
 
 // GetMetadata returns the current sequence and view number (in a marshaled ViewMetadata protobuf message)
+// 返回当前的 seq 和view number (封装在 序列化的 ViewMetadata 消息中)
 func (v *View) GetMetadata() []byte {
 	metadata := &protos.ViewMetadata{
 		ViewId:          v.Number,
@@ -971,38 +978,44 @@ func (v *View) GetMetadata() []byte {
 		prevProp *protos.Proposal
 	)
 	verificationSeq := v.Verifier.VerificationSequence()
-
+	// 取出前一个持久化的 proposal
 	prevProp, prevSigs = v.RetrieveCheckpoint()
-
+	// 从proposal 取出Metadata
 	prevMD := &protos.ViewMetadata{}
 	if err := proto.Unmarshal(prevProp.Metadata, prevMD); err != nil {
 		v.Logger.Panicf("Attempted to propose a proposal with invalid unchanged previous proposal view metadata: %v", err)
 	}
-
+	// 直接沿用了上一个proposal的黑名单
 	metadata.BlackList = prevMD.BlackList
-
+	// 设置了metadata 的blackList
+	// 如果没有开启leader 轮换，那么BlackList 会设为nil
 	metadata = v.metadataWithUpdatedBlacklist(metadata, verificationSeq, prevProp, prevSigs)
+	// 设置了Metadata中的 PrevCommitSignatureDigest
+	// 如果没有开始leader 轮换，那么没有操作
 	metadata = v.bindCommitSignaturesToProposalMetadata(metadata, prevSigs)
 
 	return MarshalOrPanic(metadata)
 }
 
+// 根据 是否有成员变化以及验证seq是否变化，来决定是否更新黑名单
 func (v *View) metadataWithUpdatedBlacklist(metadata *protos.ViewMetadata, verificationSeq uint64, prevProp *protos.Proposal, prevSigs []*protos.Signature) *protos.ViewMetadata {
+	// 判断是否有成员发生改变
 	var membershipChange bool
 	if v.MembershipNotifier != nil {
 		membershipChange = v.MembershipNotifier.MembershipChange()
 	}
-
+	// 验证seq 没有变，并且没有成员发生变化
 	if verificationSeq == prevProp.VerificationSequence && !membershipChange {
 		v.Logger.Debugf("Proposing proposal %d with verification sequence of %d and %d commit signatures",
 			v.ProposalSequence, verificationSeq, len(prevSigs))
 		return v.updateBlacklistMetadata(metadata, prevSigs, prevProp.Metadata)
 	}
-
+	// 验证seq 发生了变化
 	if verificationSeq != prevProp.VerificationSequence {
 		v.Logger.Infof("Skipping updating blacklist due to verification sequence changing from %d to %d",
 			prevProp.VerificationSequence, verificationSeq)
 	}
+	// 成员发生了变化
 	if membershipChange {
 		v.Logger.Infof("Skipping updating blacklist due to membership change")
 	}
@@ -1038,8 +1051,10 @@ func (v *View) Propose(proposal types.Proposal) {
 	v.Logger.Debugf("Proposing proposal sequence %d in view %d", seq, v.Number)
 }
 
+// 绑定commit 签名到 proposal的Metadata中去
 func (v *View) bindCommitSignaturesToProposalMetadata(metadata *protos.ViewMetadata, prevSigs []*protos.Signature) *protos.ViewMetadata {
 	if v.DecisionsPerLeader == 0 {
+		// 领导人轮换已禁用，不会将签名绑定到提案
 		v.Logger.Debugf("Leader rotation is disabled, will not bind signatures to proposals")
 		return metadata
 	}
@@ -1053,6 +1068,7 @@ func (v *View) bindCommitSignaturesToProposalMetadata(metadata *protos.ViewMetad
 	return metadata
 }
 
+// 关闭视图
 func (v *View) stop() {
 	v.stopOnce.Do(func() {
 		if v.abortChan == nil {
@@ -1063,11 +1079,13 @@ func (v *View) stop() {
 }
 
 // Abort forces the view to end
+// 强制视图结束
 func (v *View) Abort() {
 	v.stop()
 	v.viewEnded.Wait()
 }
 
+// 判断视图是否已经停止
 func (v *View) Stopped() bool {
 	select {
 	case <-v.abortChan:
@@ -1081,13 +1099,15 @@ func (v *View) GetLeaderID() uint64 {
 	return v.LeaderID
 }
 
+// 更新黑名单
 func (v *View) updateBlacklistMetadata(metadata *protos.ViewMetadata, prevSigs []*protos.Signature, prevMetadata []byte) *protos.ViewMetadata {
+	// 如果没有启动leader 轮换，那么 黑名单直接赋为nil
 	if v.DecisionsPerLeader == 0 {
 		v.Logger.Debugf("Rotation is disabled, setting blacklist to be empty")
 		metadata.BlackList = nil
 		return metadata
 	}
-
+	// 持有prepare的签名
 	preparesFrom := make(map[uint64]*protos.PreparesFrom)
 
 	for _, sig := range prevSigs {
@@ -1098,7 +1118,7 @@ func (v *View) updateBlacklistMetadata(metadata *protos.ViewMetadata, prevSigs [
 		}
 		preparesFrom[sig.Signer] = prpf
 	}
-
+	// 前一个proposal的 viewMetadata
 	prevMD := &protos.ViewMetadata{}
 	if err := proto.Unmarshal(prevMetadata, prevMD); err != nil {
 		v.Logger.Panicf("Attempted to propose a proposal with invalid previous proposal view metadata: %v", err)

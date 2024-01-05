@@ -87,10 +87,10 @@ type ViewChanger struct {
 	lastTick            time.Time
 	ResendTimeout       time.Duration
 	lastResend          time.Time
-	ViewChangeTimeout   time.Duration
-	startViewChangeTime time.Time
-	checkTimeout        bool
-	backOffFactor       uint64
+	ViewChangeTimeout   time.Duration // 视图改变过程的超时时间
+	startViewChangeTime time.Time     //开始进行视图改变的 时间
+	checkTimeout        bool          // 判断是否打开检测超时功能，再开启改变视图的时候，会赋值为true
+	backOffFactor       uint64        // 时间系数
 
 	// Runtime
 	MetricsViewChange         *api.MetricsViewChange
@@ -117,7 +117,7 @@ type ViewChanger struct {
 }
 
 // Start the view changer
-// 启动视图更改器
+// ViewChanger 内部字段初始化并且 启动视图更改器
 func (v *ViewChanger) Start(startViewNumber uint64) {
 	v.incMsgs = make(chan *incMsg, v.InMsqQSize)
 	v.startChangeChan = make(chan *change, 2)
@@ -257,7 +257,10 @@ func (v *ViewChanger) checkIfResendViewChange(now time.Time) {
 	}
 }
 
+// 判断 超时时间和now的关系
+// 如果 超时时间在now 前面，也就是说截止now，视图更改过程超时了
 func (v *ViewChanger) checkIfTimeout(now time.Time) bool {
+	// 判断是否打开检测超时功能 在startViewChange的时候会赋值为true
 	if !v.checkTimeout {
 		return false
 	}
@@ -266,27 +269,40 @@ func (v *ViewChanger) checkIfTimeout(now time.Time) bool {
 		return false
 	}
 	v.Logger.Debugf("Node %d got a view change timeout, the current view is %d", v.SelfID, v.currView)
+	// 来到这里 说明 视图改变已经超时了
 	v.checkTimeout = false // stop timeout for now, a new one will start when a new view change begins
-	v.backOffFactor++      // next timeout will be longer
+	// 现在停止超时，当一个新的视图更改开始时，一个新timeout的将开始
+	v.backOffFactor++ // next timeout will be longer 下次超时时间会更长
 	// the timeout has passed, something went wrong, try sync and complain
 	v.Logger.Debugf("Node %d is calling sync because it got a view change timeout", v.SelfID)
+	// 启动了 同步
 	v.Synchronizer.Sync()
+	// 重新开始视图更改
 	v.StartViewChange(v.currView, false) // don't stop the view, the sync maybe created a good view
 	return true
 }
 
+// processMsg
+//
+//	@Description: 分发其他副本发送过来的消息
+//	@receiver v
+//	@param sender
+//	@param m
 func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 	// viewChange message
-	// 如果是viewChange 消息
+	// 如果是viewChange 消息 vc 是viewChange
 	if vc := m.GetViewChange(); vc != nil {
 		v.Logger.Debugf("Node %d is processing a view change message %v from %d with next view %d", v.SelfID, m, sender, vc.NextView)
+		// v.nextViews 是个map key 是view编号，value是发送者
 		v.nvs.registerNext(vc.NextView, sender)
 		// check view number
+		// 仅接受视图更改到紧邻的下一个视图编号
 		if vc.NextView == v.currView+1 { // accept view change only to immediate next view number
 			v.viewChangeMsgs.registerVote(sender, m)
 			v.processViewChangeMsg(false)
 			return
 		}
+		// 节点正在进行视图更改
 		if v.nextView == v.currView+1 && // node has already started view change with last view
 			vc.NextView > v.realView &&
 			vc.NextView < v.currView+1 &&
@@ -299,6 +315,7 @@ func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 					},
 				},
 			}
+			// 广播veiwChange消息
 			v.Comm.BroadcastConsensus(msg)
 			v.Logger.Warnf("Node %d got viewChange message %v from %d with view %d, expected view %d, help the lagging nodes", v.SelfID, m, sender, vc.NextView, v.currView+1)
 			return
@@ -332,6 +349,7 @@ func (v *ViewChanger) processMsg(sender uint64, m *protos.Message) {
 }
 
 // InformNewView tells the view changer to advance to a new view number
+// 告诉视图更改器前进到新的视图编号 这个方法里面 只是发送了消息
 func (v *ViewChanger) InformNewView(view uint64) {
 	select {
 	case v.informChan <- view:
@@ -340,6 +358,7 @@ func (v *ViewChanger) InformNewView(view uint64) {
 	}
 }
 
+// viewChanger 处理 前进到view 视图
 func (v *ViewChanger) informNewView(view uint64) {
 	if view < v.currView {
 		v.Logger.Debugf("Node %d was informed of view %d, but the current view is %d", v.SelfID, view, v.currView)
@@ -373,7 +392,10 @@ func (v *ViewChanger) StartViewChange(view uint64, stopView bool) {
 
 // StartViewChange stops current view and timeouts, and broadcasts a view change message to all
 // 停止当前视图和超时，并向所有人广播视图更改消息
-// 也就是说 change中的view 并不是前往的编号。
+// 也就是说 change中的view 并不是前往的编号。 真正前往的视图编号是 v.currView+1
+// 但是change中的view 必须是 >= v.currView
+// 该方法中 将v.nextView = v.currView + 1 这个很重要
+// 该方法会广播 viewChange消息
 func (v *ViewChanger) startViewChange(change *change) {
 	if change.view < v.currView { // this is about an old view
 		v.Logger.Debugf("Node %d has a view change request with an old view %d, while the current view is %d", v.SelfID, change.view, v.currView)
@@ -407,19 +429,26 @@ func (v *ViewChanger) startViewChange(change *change) {
 	v.checkTimeout = true
 }
 
+// 处理 viewChange消息
+// 当接收到足量的 viewChange 消息 v.v.currView = v.nextView
+// restore ????? 不知道啥作用
 func (v *ViewChanger) processViewChangeMsg(restore bool) {
+	// 收到了f+1个viewChange消息 && 启动了加速视图改变
 	if ((uint64(len(v.viewChangeMsgs.voted)) == uint64(v.f+1)) && v.SpeedUpViewChange) || restore { // join view change
 		v.Logger.Debugf("Node %d is joining view change, last view is %d", v.SelfID, v.currView)
 		v.startViewChange(&change{v.currView, true})
 	}
+	// 没有收集到足够的viewChange && restore = false
 	if (len(v.viewChangeMsgs.voted) < v.quorum-1) && !restore {
 		return
 	}
 	// send view data
+	// 发送 viewData 能来到这里，说明 已经收集到了足量的viewChange 消息， 或者 restore = true
 	if !v.SpeedUpViewChange {
 		v.Logger.Debugf("Node %d is joining view change, last view is %d", v.SelfID, v.currView)
 		v.startViewChange(&change{v.currView, true})
 	}
+	// restore = false
 	if !restore {
 		msgToSave := &protos.SavedMessage{
 			Content: &protos.SavedMessage_ViewChange{
@@ -428,28 +457,40 @@ func (v *ViewChanger) processViewChangeMsg(restore bool) {
 				},
 			},
 		}
+		// 将viewChange 持久化
 		if err := v.State.Save(msgToSave); err != nil {
 			v.Logger.Panicf("Failed to save message to state, error: %v", err)
 		}
 	}
+	// 这个很重要，正式改变了 v.currView
 	v.currView = v.nextView
 	v.MetricsViewChange.CurrentView.Set(float64(v.currView))
+	// 清空消息
 	v.viewChangeMsgs.clear(v.N)
 	v.viewDataMsgs.clear(v.N) // clear because currView changed
+	// 生成viewData 消息
 	msg := v.prepareViewDataMsg()
 	leader := v.getLeader()
+	// 判断是否leader，只有leader 需要收集viewData消息
 	if leader == v.SelfID {
 		v.viewDataMsgs.registerVote(v.SelfID, msg)
 	} else {
+		// 不是leader， 向leader发送消息
 		v.Comm.SendConsensus(leader, msg)
 	}
 	v.Logger.Debugf("Node %d sent view data msg, with next view %d, to the new leader %d", v.SelfID, v.currView, leader)
 }
 
+// 生成viewData消息
+// 其中包含了lastDecision inFlightProposal 当前节点的签名
 func (v *ViewChanger) prepareViewDataMsg() *protos.Message {
+	// 检查点中取出 lastDecision
+	// 并且判断当前正在执行中的proposal 是否有效
 	lastDecision, lastDecisionSignatures := v.Checkpoint.Get()
 	inFlight := v.getInFlight(lastDecision)
+	// 判断正在执行中的proposal 是否已经prepared
 	prepared := v.InFlight.IsInFlightPrepared()
+
 	vd := &protos.ViewData{
 		NextView:               v.currView,
 		LastDecision:           lastDecision,
@@ -471,6 +512,8 @@ func (v *ViewChanger) prepareViewDataMsg() *protos.Message {
 	return msg
 }
 
+// 获取正在执行中的proposal副本，并且根据传入的lastDecision 判断正在执行中的proposal是否有效
+// 如果无效，返回nil。
 func (v *ViewChanger) getInFlight(lastDecision *protos.Proposal) *protos.Proposal {
 	inFlight := v.InFlight.InFlightProposal()
 	if inFlight == nil {
@@ -484,6 +527,7 @@ func (v *ViewChanger) getInFlight(lastDecision *protos.Proposal) *protos.Proposa
 	if err := proto.Unmarshal(inFlight.Metadata, inFlightMetadata); err != nil {
 		v.Logger.Panicf("Node %d is unable to unmarshal its own in flight metadata, err: %v", v.SelfID, err)
 	}
+	// 这里相当于创建了一个副本
 	proposal := &protos.Proposal{
 		Header:               inFlight.Header,
 		Metadata:             inFlight.Metadata,
@@ -497,16 +541,19 @@ func (v *ViewChanger) getInFlight(lastDecision *protos.Proposal) *protos.Proposa
 	if lastDecision.Metadata == nil {
 		return proposal // this is the first proposal after genesis
 	}
+	// 反序列化出 lastDecision 的 Metadata
 	lastDecisionMetadata := &protos.ViewMetadata{}
 	if err := proto.Unmarshal(lastDecision.Metadata, lastDecisionMetadata); err != nil {
 		v.Logger.Panicf("Node %d is unable to unmarshal its own last decision metadata from checkpoint, err: %v", v.SelfID, err)
 	}
 	if inFlightMetadata.LatestSequence == lastDecisionMetadata.LatestSequence {
+		// 节点 %d 的提案和最后的决策具有相同的seq 说明这不是一个真正在运行中的 proposal
 		v.Logger.Debugf("Node %d's in flight proposal and the last decision has the same sequence: %d", v.SelfID, inFlightMetadata.LatestSequence)
 		return nil // this is not an actual in flight proposal
 	}
 	if inFlightMetadata.LatestSequence+1 == lastDecisionMetadata.LatestSequence && v.committedDuringViewChange != nil &&
 		v.committedDuringViewChange.LatestSequence == lastDecisionMetadata.LatestSequence {
+		// 节点 %d 的正在运行的提案seq是 %d，同时已经提交了决策 %d，“+”，但这是因为它在视图更改期间提交了它
 		v.Logger.Infof("Node %d's in flight proposal sequence is %d while already committed decision %d, "+
 			"but that is because it committed it during the view change", v.SelfID, inFlightMetadata.LatestSequence, lastDecisionMetadata.LatestSequence)
 		return nil
@@ -681,6 +728,7 @@ func (v *ViewChanger) checkLastDecision(svd *protos.SignedViewData, sender uint6
 	return true, lastDecisionMD.LatestSequence
 }
 
+// 从检查点中 取出 最后的 decision的 proposal 以及 序列号
 func (v *ViewChanger) extractCurrentSequence() (uint64, *protos.Proposal) {
 	myMetadata := &protos.ViewMetadata{}
 	myLastDesicion, _ := v.Checkpoint.Get()
@@ -945,24 +993,36 @@ func maxLastDecisionSequence(messages []*protos.ViewData) uint64 {
 	return max
 }
 
+// validateNewViewMsg
+//
+//	@Description: 验证NewView 消息
+//	@receiver v
+//	@param msg NewView
+//	@return valid 返回是否有效
+//	@return sync
+//	@return deliver
 func (v *ViewChanger) validateNewViewMsg(msg *protos.NewView) (valid bool, sync bool, deliver bool) {
+	// 获取签名后的viewData
 	signed := msg.GetSignedViewData()
+	// key 是签名者
 	nodesMap := make(map[uint64]struct{}, v.N)
 	validViewDataMsgs := 0
+	// 是从检查点中取出的
 	mySequence, myLastDecision := v.extractCurrentSequence()
 	for _, svd := range signed {
 		if _, exist := nodesMap[svd.Signer]; exist {
 			continue // seen data from this node already
 		}
 		nodesMap[svd.Signer] = struct{}{}
-
+		// 反序列化除 viewData
 		vd := &protos.ViewData{}
 		if err := proto.Unmarshal(svd.RawViewData, vd); err != nil {
 			v.Logger.Errorf("Node %d was unable to unmarshal viewData from the newView message, error: %v", v.SelfID, err)
 			return false, false, false
 		}
-
+		// 也就是说 这里 必须要求 vd的 nextVIew 必须等于 viewChanger的currView
 		if vd.NextView != v.currView {
+			// 节点 %d 正在处理 newView 消息，但 %s 的 nextView 是 %d，而 currView 是 %d
 			v.Logger.Warnf("Node %d is processing newView message, but nextView of %s is %d, while the currView is %d", v.SelfID, signedViewDataToString(svd), vd.NextView, v.currView)
 			return false, false, false
 		}
@@ -1124,6 +1184,7 @@ func (v *ViewChanger) extractViewDataMessages(msg *protos.NewView) []*protos.Vie
 	return vds
 }
 
+// 处理NewView消息
 func (v *ViewChanger) processNewViewMsg(msg *protos.NewView) {
 	valid, calledSync, calledDeliver := v.validateNewViewMsg(msg)
 	for calledDeliver {
@@ -1176,6 +1237,7 @@ func (v *ViewChanger) processNewViewMsg(msg *protos.NewView) {
 	v.realView = v.currView
 	v.MetricsViewChange.RealView.Set(float64(v.realView))
 	v.nvs.clear()
+	// 进行视图改变
 	v.Controller.ViewChanged(v.currView, mySequence+1)
 
 	v.RequestsTimer.RestartTimers()
@@ -1322,15 +1384,18 @@ func (v *ViewChanger) commitInFlightProposal(proposal *protos.Proposal) (success
 }
 
 // Decide delivers to the application and informs the view changer after delivery
+// 交付给应用程序，并在交付后通知视图更改器
 func (v *ViewChanger) Decide(proposal types.Proposal, signatures []types.Signature, requests []types.RequestInfo) {
 	v.inFlightView.stop()
 	v.Logger.Debugf("Delivering to app from Decide the last decision proposal")
 	reconfig := v.Application.Deliver(proposal, signatures)
+	// 如果是重新配置交易，会关闭当前viewChanger
 	if reconfig.InLatestDecision {
 		v.close()
 	}
 	v.Logger.Debugf("Delivering end to app from Decide the last decision proposal")
 
+	// 移除请求定时器
 	for _, reqInfo := range requests {
 		if err := v.RequestsTimer.RemoveRequest(reqInfo); err != nil {
 			v.Logger.Warnf("Error during remove of request %s from the pool, err: %v", reqInfo, err)
@@ -1360,6 +1425,7 @@ func (v *ViewChanger) Sync() {
 }
 
 // HandleViewMessage passes a message to the in flight proposal view if applicable
+// 将消息传递到正常处理中proposal视图 (如果适用)
 func (v *ViewChanger) HandleViewMessage(sender uint64, m *protos.Message) {
 	v.inFlightViewLock.RLock()
 	defer v.inFlightViewLock.RUnlock()

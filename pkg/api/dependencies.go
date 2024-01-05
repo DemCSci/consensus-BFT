@@ -71,8 +71,10 @@ type Verifier interface {
 }
 
 // MembershipNotifier notifies if there was a membership change in the last proposal.
+// 通知上一个提案中是否有成员更改
 type MembershipNotifier interface {
 	// MembershipChange returns true if there was a membership change in the last proposal.
+	// 如果上一个提案中有成员更改，则返回true
 	MembershipChange() bool
 }
 

@@ -291,6 +291,7 @@ func (c *Consensus) Stop() {
 	c.consensusDone.Wait()
 }
 
+// 只处理共识消息
 func (c *Consensus) HandleMessage(sender uint64, m *protos.Message) {
 	if _, exists := c.nodeMap.Load(sender); !exists {
 		c.Logger.Warnf("Received message from unexpected node %d", sender)
@@ -298,15 +299,18 @@ func (c *Consensus) HandleMessage(sender uint64, m *protos.Message) {
 	}
 	c.consensusLock.RLock()
 	defer c.consensusLock.RUnlock()
+	// 传递到controller层进行分发消息
 	c.controller.ProcessMessages(sender, m)
 }
 
+// 处理客户端发送过来的请求 但是好像 一般基本不用这个 而是用下面的SubmitRequest
 func (c *Consensus) HandleRequest(sender uint64, req []byte) {
 	c.consensusLock.RLock()
 	defer c.consensusLock.RUnlock()
 	c.controller.HandleRequest(sender, req)
 }
 
+// 提交到共识组件
 func (c *Consensus) SubmitRequest(req []byte) error {
 	c.consensusLock.RLock()
 	defer c.consensusLock.RUnlock()
