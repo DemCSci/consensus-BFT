@@ -118,6 +118,7 @@ func (ps *PersistedState) Restore(v *View) error {
 	v.Phase = COMMITTED
 
 	entries := ps.Entries
+	//如果为空，就没有什么可以恢复的
 	if len(entries) == 0 {
 		ps.Logger.Infof("Nothing to restore")
 		return nil
@@ -131,20 +132,20 @@ func (ps *PersistedState) Restore(v *View) error {
 		ps.Logger.Errorf("Failed unmarshaling last entry from WAL: %v", err)
 		return errors.Wrap(err, "failed unmarshaling last entry from WAL")
 	}
-
+	// 判断是否是proposed的类型
 	if proposed := lastPersistedMessage.GetProposedRecord(); proposed != nil {
 		return ps.recoverProposed(proposed, v)
 	}
-
+	// 判断是否是 已经commit的消息
 	if commitMsg := lastPersistedMessage.GetCommit(); commitMsg != nil {
 		return ps.recoverPrepared(commitMsg, v, entries)
 	}
-
+	// 如果是newView 消息 就不恢复view
 	if newViewMsg := lastPersistedMessage.GetNewView(); newViewMsg != nil {
 		ps.Logger.Infof("last entry in WAL is a newView record")
 		return nil
 	}
-
+	// 如果是viewChange 消息 就不恢复view
 	if viewChangeMsg := lastPersistedMessage.GetViewChange(); viewChangeMsg != nil {
 		ps.Logger.Infof("last entry in WAL is a viewChange message")
 		return nil
@@ -155,12 +156,13 @@ func (ps *PersistedState) Restore(v *View) error {
 
 // recoverProposed
 //
-//	@Description: 从lastPersistedMessage 提取出 PrePrepare消息 到 v中去
+//	@Description: 从 GetPrePrepare 中恢复出view
 //	@receiver ps
 //	@param lastPersistedMessage
 //	@param v
 //	@return error
 func (ps *PersistedState) recoverProposed(lastPersistedMessage *protos.ProposedRecord, v *View) error {
+	// 取出proposal
 	prop := lastPersistedMessage.GetPrePrepare().Proposal
 	v.inFlightProposal = &types.Proposal{
 		VerificationSequence: int64(prop.VerificationSequence),
@@ -177,7 +179,7 @@ func (ps *PersistedState) recoverProposed(lastPersistedMessage *protos.ProposedR
 			Prepare: lastPersistedMessage.GetPrepare(),
 		},
 	}
-	v.Phase = PROPOSED
+	v.Phase = PROPOSED // PROPOSED 阶段
 	v.Number = prp.View
 	v.ProposalSequence = prp.Seq
 	md := &protos.ViewMetadata{}
@@ -189,17 +191,20 @@ func (ps *PersistedState) recoverProposed(lastPersistedMessage *protos.ProposedR
 	return nil
 }
 
+// 从commit 消息中恢复 出 view
 func (ps *PersistedState) recoverPrepared(lastPersistedMessage *protos.Message, v *View, entries [][]byte) error {
 	// Last entry is a commit, so we should have not pruned the previous pre-prepare
+	// 当前消息是commit消息，那么前面一定会存在prepared消息和prePrepare消息
 	if len(entries) < 2 {
 		return fmt.Errorf("last message is a commit, but expected to also have a matching pre-prepare")
 	}
+	// 恢复出来 prePrepare消息
 	prePrepareMsg := &protos.SavedMessage{}
 	if err := proto.Unmarshal(entries[len(entries)-2], prePrepareMsg); err != nil {
 		ps.Logger.Errorf("Failed unmarshaling second last entry from WAL: %v", err)
 		return errors.Wrap(err, "failed unmarshaling last entry from WAL")
 	}
-
+	// PrePrepare 消息
 	prePrepareFromWAL := prePrepareMsg.GetProposedRecord().GetPrePrepare()
 
 	if prePrepareFromWAL == nil {

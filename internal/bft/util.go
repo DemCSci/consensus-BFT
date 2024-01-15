@@ -298,6 +298,7 @@ type ProposalMaker struct {
 //	@return proposer
 //	@return phase
 func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decisionsInView uint64, quorumSize int) (proposer Proposer, phase Phase) {
+	// 基本项赋值
 	view := &View{
 		RetrieveCheckpoint: pm.Checkpoint.Get,
 		DecisionsPerLeader: pm.DecisionsPerLeader,
@@ -318,16 +319,16 @@ func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decision
 		DecisionsInView:    decisionsInView,
 		State:              pm.State,
 		InMsgQSize:         pm.InMsqQSize,
-		ViewSequences:      pm.ViewSequences,
+		ViewSequences:      pm.ViewSequences, // 和controller共享同一块内存
 		MetricsBlacklist:   pm.MetricsBlacklist,
 		MetricsView:        pm.MetricsView,
 	}
-
+	// 存进去了 新的 seq ，controller层也能获取到
 	view.ViewSequences.Store(ViewSequence{
 		ViewActive:  true,
 		ProposalSeq: proposalSequence,
 	})
-
+	// 只会执行一次 为了从程序崩溃中 恢复过来
 	pm.restoreOnceFromWAL.Do(func() {
 		err := pm.State.Restore(view)
 		if err != nil {
@@ -351,7 +352,7 @@ func (pm *ProposalMaker) NewProposer(leader, proposalSequence, viewNum, decision
 	view.MetricsView.ProposalSequence.Set(float64(view.ProposalSequence))
 	view.MetricsView.DecisionsInView.Set(float64(view.DecisionsInView))
 	view.MetricsView.Phase.Set(float64(view.Phase))
-
+	// 如果没有从WAL恢复出来，那么Phase 是COMMIT状态
 	return view, view.Phase
 }
 

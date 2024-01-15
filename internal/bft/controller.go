@@ -83,6 +83,7 @@ type Proposer interface {
 //
 //go:generate mockery -dir . -name ProposerBuilder -case underscore -output ./mocks/
 type ProposerBuilder interface {
+	// 新视图的 leader 新视图的 seq 新视图的 viewNum 新视图的 viewNum
 	NewProposer(leader, proposalSequence, viewNum, decisionsInView uint64, quorumSize int) (Proposer, Phase)
 }
 
@@ -140,7 +141,7 @@ type Controller struct {
 
 	controllerDone sync.WaitGroup
 
-	ViewSequences *atomic.Value
+	ViewSequences *atomic.Value // 和viewChanger共享同一块内存 里面存储的值是这个 ViewSequence类型
 
 	StartedWG *sync.WaitGroup
 	syncLock  sync.Mutex
@@ -166,6 +167,7 @@ func (c *Controller) latestSeq() uint64 {
 	return md.LatestSequence
 }
 
+// 停止当前视图
 func (c *Controller) currentViewStopped() bool {
 	c.currViewLock.RLock()
 	view := c.currView
@@ -327,18 +329,24 @@ func (c *Controller) OnHeartbeatTimeout(view uint64, leaderID uint64) {
 func (c *Controller) ProcessMessages(sender uint64, m *protos.Message) {
 	c.Logger.Debugf("%d got message from %d: %s", c.ID, sender, MsgToString(m))
 	switch m.GetContent().(type) {
+	// prePrepare、prepare、commit 消息
 	case *protos.Message_PrePrepare, *protos.Message_Prepare, *protos.Message_Commit:
 		c.currViewLock.RLock()
 		view := c.currView
 		c.currViewLock.RUnlock()
+		// view 进行处理
 		view.HandleMessage(sender, m)
+		// viewChanger 进行处理
 		c.ViewChanger.HandleViewMessage(sender, m)
 		if sender == c.leaderID() {
+			// 判断发送者是否leader，进行注入人造心跳
 			c.LeaderMonitor.InjectArtificialHeartbeat(sender, c.convertViewMessageToHeartbeat(m))
 		}
 	case *protos.Message_ViewChange, *protos.Message_ViewData, *protos.Message_NewView:
+		// 只有 viewChanger进行处理
 		c.ViewChanger.HandleMessage(sender, m)
 	case *protos.Message_HeartBeat, *protos.Message_HeartBeatResponse:
+		// 心跳处理
 		c.LeaderMonitor.ProcessMsg(sender, m)
 	case *protos.Message_StateTransferRequest:
 		c.respondToStateTransferRequest(sender)
@@ -380,7 +388,7 @@ func (c *Controller) convertViewMessageToHeartbeat(m *protos.Message) *protos.Me
 
 // startView
 //
-//	@Description:  启动视图
+//	@Description:  启动视图 只有这个地方创建了新的view
 //	@receiver c
 //	@param proposalSequence 视图中的 seq
 //	每次都是新建了一个proposer
@@ -408,6 +416,7 @@ func (c *Controller) startView(proposalSequence uint64) {
 	c.Logger.Infof("Starting view with number %d, sequence %d, and decisions %d", c.currViewNumber, proposalSequence, c.currDecisionsInView)
 }
 
+// 改变view ，里面会新启动一个view
 func (c *Controller) changeView(newViewNumber uint64, newProposalSequence uint64, newDecisionsInView uint64) {
 	latestView := c.getCurrentViewNumber()
 	if latestView > newViewNumber {
@@ -434,14 +443,21 @@ func (c *Controller) changeView(newViewNumber uint64, newProposalSequence uint64
 	c.startView(newProposalSequence)
 
 	if iAm, _ := c.iAmTheLeader(); iAm {
+		// 重置之后 允许调用NextBatch了
 		c.Batcher.Reset()
 	}
 }
 
+// abortView
+//
+//	@Description: 放弃view 视图 如果当前持有leader令牌，那么会放弃leader令牌 会调用到view层的stop
+//	@receiver c
+//	@param view 要放弃的视图
+//	@return bool
 func (c *Controller) abortView(view uint64) bool {
 	currView := c.getCurrentViewNumber()
 	c.Logger.Debugf("view for abort %d, current view %d", view, currView)
-
+	// 如果小于controller持有的当前视图编号，那么就返回false
 	if view < currView {
 		c.Logger.Debugf("Was asked to abort view %d but the current view with number %d", view, currView)
 		return false
@@ -449,9 +465,12 @@ func (c *Controller) abortView(view uint64) bool {
 
 	// Drain the leader token in case we held it,
 	// so we won't start proposing after view change.
+	// 如果我们持有它，请耗尽领导者令牌
+	// 因此我们不会在视图更改后开始提出建议。 relinquish:放弃
 	c.relinquishLeaderToken()
 
 	// Kill current view
+	// 杀掉当前的view
 	c.Logger.Debugf("Aborting current view with number %d", c.currViewNumber)
 	c.currView.Abort()
 
@@ -787,6 +806,7 @@ func (c *Controller) acquireLeaderToken() {
 	}
 }
 
+// 放弃leaderToken 令牌
 func (c *Controller) relinquishLeaderToken() {
 	select {
 	case <-c.leaderToken:

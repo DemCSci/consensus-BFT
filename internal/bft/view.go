@@ -55,6 +55,7 @@ type State interface {
 
 	// Restore restores the given view to its latest state
 	// before a crash, if applicable.
+	// Restore将给定视图恢复到崩溃前的最新状态 (如果适用)。
 	Restore(*View) error
 }
 
@@ -70,10 +71,10 @@ type CheckpointRetriever func() (*protos.Proposal, []*protos.Signature)
 type View struct {
 	// Configuration
 	DecisionsPerLeader uint64
-	RetrieveCheckpoint CheckpointRetriever
+	RetrieveCheckpoint CheckpointRetriever // 检查点取回函数
 	SelfID             uint64
 	N                  uint64 // 节点数量
-	LeaderID           uint64
+	LeaderID           uint64 // 当前view的LeaderID
 	Quorum             int
 	Number             uint64  // view 编号
 	Decider            Decider // View 的 Decider  就是controller
@@ -87,7 +88,7 @@ type View struct {
 	ProposalSequence   uint64
 	DecisionsInView    uint64
 	State              State // 状态存储
-	Phase              Phase // 所处的阶段
+	Phase              Phase // 所处的阶段 默认是 COMMITTED 阶段
 	InMsgQSize         int
 	// Runtime
 	lastVotedProposalByID map[uint64]*protos.Commit
@@ -188,7 +189,7 @@ func (v *View) setupVotes() {
 }
 
 // HandleMessage handles incoming messages
-// 分发 外部传来的消息
+// 分发 controller 传来的消息
 func (v *View) HandleMessage(sender uint64, m *protos.Message) {
 	msg := &incMsg{sender: sender, Message: m}
 	select {
@@ -204,8 +205,8 @@ func (v *View) processMsg(sender uint64, m *protos.Message) {
 		return
 	}
 	// Ensure view number is equal to our view
-	msgViewNum := viewNumber(m)
-	msgProposalSeq := proposalSequence(m)
+	msgViewNum := viewNumber(m)           // 取出view 编号
+	msgProposalSeq := proposalSequence(m) // 取出 seq 编号
 
 	// 消息中的 视图 编号和 本节点的视图编号不同
 	if msgViewNum != v.Number {

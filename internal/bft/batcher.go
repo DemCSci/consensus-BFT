@@ -96,6 +96,7 @@ func (b *BatchBuilder) Closed() bool {
 }
 
 // Reset reopens the close channel to allow calling NextBatch
+// 重新打开关闭通道以允许调用NextBatch
 func (b *BatchBuilder) Reset() {
 	b.closeLock.Lock()
 	defer b.closeLock.Unlock()

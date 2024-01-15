@@ -166,7 +166,7 @@ func (hm *HeartbeatMonitor) ProcessMsg(sender uint64, msg *smartbftprotos.Messag
 }
 
 // InjectArtificialHeartbeat injects an artificial heartbeat to the monitor
-// 注入人造心跳消息
+// 注入人造心跳消息，是为了 如何leader 发送过来prePrepare prepare commit 消息，也算leader活着
 func (hm *HeartbeatMonitor) InjectArtificialHeartbeat(sender uint64, msg *smartbftprotos.Message) {
 	select {
 	case hm.artificialHeartbeat <- incMsg{
@@ -292,6 +292,7 @@ func (hm *HeartbeatMonitor) handleHeartBeat(sender uint64, hb *smartbftprotos.He
 			hm.followerBehind = false
 		}
 	} else {
+		// 能来到这里 说明是 人造心跳
 		hm.followerBehind = false
 	}
 

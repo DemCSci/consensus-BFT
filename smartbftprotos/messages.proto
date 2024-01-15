@@ -103,19 +103,20 @@ message Proposal {
 }
 
 message ViewMetadata {
-    uint64 view_id = 1;
-    uint64 latest_sequence = 2;
-    uint64 decisions_in_view = 3;
+    uint64 view_id = 1; // 视图编号
+    uint64 latest_sequence = 2; // seq 编号
+    uint64 decisions_in_view = 3; // 当前view 已经决策的数量
     repeated uint64 black_list = 4;
-    bytes prev_commit_signature_digest = 5;
+    bytes prev_commit_signature_digest = 5; //前一个commit的签名
 }
 
+// 持久化的信息，会被写入WAL
 message SavedMessage {
     oneof content {
         ProposedRecord proposed_record = 1;
-        Message commit = 2;
-        ViewMetadata new_view = 3;
-        ViewChange view_change = 4;
+        Message commit = 2;      // Message 所有类型的共识消息
+        ViewMetadata new_view = 3;  // viewMetadata
+        ViewChange view_change = 4; // viewChange 消息
     }
 }
 

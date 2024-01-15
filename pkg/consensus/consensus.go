@@ -340,7 +340,7 @@ func (c *Consensus) proposalMaker() *algorithm.ProposalMaker {
 		Verifier:           c.Verifier,
 		N:                  c.numberOfNodes,
 		InMsqQSize:         int(c.Config.IncomingMessageBufferSize),
-		ViewSequences:      c.controller.ViewSequences,
+		ViewSequences:      c.controller.ViewSequences, // 和 controller层的 seq是同一块内存
 	}
 }
 
@@ -389,6 +389,7 @@ func sortNodes(nodes []uint64) []uint64 {
 	return sorted
 }
 
+// 该方法中对各个组件进行了初始化
 func (c *Consensus) createComponents() {
 	c.viewChanger = &algorithm.ViewChanger{
 		SelfID:             c.Config.SelfID,
@@ -450,11 +451,12 @@ func (c *Consensus) createComponents() {
 	c.viewChanger.Application = &algorithm.MutuallyExclusiveDeliver{C: c.controller}
 	c.viewChanger.Comm = c.controller
 	c.viewChanger.Synchronizer = c.controller
-
+	// controller层的 ProposerBuilder
 	c.controller.ProposerBuilder = c.proposalMaker()
 }
 
 // 主要是创建了 batchBuilder 和 leaderMonitor 组件
+// 并且对 controller层和viewChanger进一步赋值
 func (c *Consensus) continueCreateComponents() {
 	batchBuilder := algorithm.NewBatchBuilder(c.Pool, c.submittedChan, c.Config.RequestBatchMaxCount, c.Config.RequestBatchMaxBytes, c.Config.RequestBatchMaxInterval)
 	leaderMonitor := algorithm.NewHeartbeatMonitor(c.Scheduler, c.Logger, c.Config.LeaderHeartbeatTimeout, c.Config.LeaderHeartbeatCount, c.controller, c.numberOfNodes, c.controller, c.controller.ViewSequences, c.Config.NumOfTicksBehindBeforeSyncing)
@@ -465,7 +467,7 @@ func (c *Consensus) continueCreateComponents() {
 	c.viewChanger.Controller = c.controller
 	c.viewChanger.Pruner = c.controller
 	c.viewChanger.RequestsTimer = c.Pool
-	c.viewChanger.ViewSequences = c.controller.ViewSequences
+	c.viewChanger.ViewSequences = c.controller.ViewSequences // 说明controller层和view层的 viewSequence 同一个
 }
 
 func (c *Consensus) setViewAndSeq(view, seq, dec uint64) (newView, newSeq, newDec uint64) {

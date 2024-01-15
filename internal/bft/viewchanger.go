@@ -58,7 +58,7 @@ type ViewChanger struct {
 	f                  int
 	quorum             int
 	SpeedUpViewChange  bool   // 加快视图改变
-	LeaderRotation     bool   // leader 轮换
+	LeaderRotation     bool   // leader 轮换 是否开启
 	DecisionsPerLeader uint64 // 每个leader决策
 
 	Logger       api.Logger
@@ -72,12 +72,12 @@ type ViewChanger struct {
 	InFlight   *InFlightData
 	State      State
 
-	Controller    ViewController
+	Controller    ViewController // 持有的就是controller层的对象
 	RequestsTimer RequestsTimer
 	Pruner        Pruner
 
 	// for the in flight proposal view
-	ViewSequences      *atomic.Value
+	ViewSequences      *atomic.Value // 和controller层共享 同一块内存
 	inFlightDecideChan chan struct{}
 	inFlightSyncChan   chan struct{}
 	inFlightView       *View
