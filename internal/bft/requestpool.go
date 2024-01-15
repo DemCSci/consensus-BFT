@@ -446,6 +446,8 @@ func (rp *Pool) Close() {
 // StopTimers stops all the timeout timers attached to the pending requests, and marks the pool as "stopped".
 // This which prevents submission of new requests, and renewal of timeouts by timer go-routines that where running
 // at the time of the call to StopTimers().
+// StopTimers停止附加到挂起请求的所有超时计时器， 并将池标记为 “已停止”。
+// 这可以防止提交新请求，timer go-routines 的超时续订，在调用StopTimers() 时运行
 func (rp *Pool) StopTimers() {
 	rp.lock.Lock()
 	defer rp.lock.Unlock()
@@ -454,6 +456,7 @@ func (rp *Pool) StopTimers() {
 
 	for _, element := range rp.existMap {
 		item := element.Value.(*requestItem)
+		// 停止超时定时器
 		item.timeout.Stop()
 	}
 

@@ -24,6 +24,8 @@ import (
 // Consensus submits requests to be total ordered,
 // and delivers to the application proposals by invoking Deliver() on it.
 // The proposals contain batches of requests assembled together by the Assembler.
+// Consensus将请求提交为total ordered，并通过在其上调用delver () 将建议交付给应用程序
+// proposals 包含由Assembler组装在一起的批量请求
 type Consensus struct {
 	Config             types.Configuration
 	Application        bft.Application
@@ -63,7 +65,7 @@ type Consensus struct {
 	consensusLock sync.RWMutex
 
 	reconfigChan chan types.Reconfig
-	running      uint64
+	running      uint64 // 1 表示在运行中 ，0 表示停止
 }
 
 func (c *Consensus) Complain(viewNum uint64, stopView bool) {
@@ -185,12 +187,14 @@ func (c *Consensus) run() {
 	}
 }
 
+// 重新配置
 func (c *Consensus) reconfig(reconfig types.Reconfig) {
 	c.Logger.Debugf("Starting reconfig")
 	c.consensusLock.Lock()
 	defer c.consensusLock.Unlock()
 
 	// make sure all components are stopped
+	// 停止 viewChanger、controller
 	c.viewChanger.Stop()
 	c.controller.StopWithPoolPause()
 	c.collector.Stop()

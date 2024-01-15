@@ -108,7 +108,7 @@ func (c *Checkpoint) Set(proposal Proposal, signatures []Signature) {
 }
 
 type Reconfig struct {
-	InLatestDecision bool
+	InLatestDecision bool // true 表示是重新配置交易 true的话，下面的才有意义
 	CurrentNodes     []uint64
 	CurrentConfig    Configuration
 }

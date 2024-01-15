@@ -11,10 +11,12 @@ import (
 )
 
 // Application delivers the consented proposal and corresponding signatures.
+// 交付共识的proposal和相应的签名
 type Application interface {
 	// Deliver delivers the given proposal and signatures.
 	// After the call returns we assume that this proposal is stored in persistent memory.
 	// It returns whether this proposal was a reconfiguration and the current config.
+	// 投递到应用层并且 返回此proposal是否是重新配置 和配置的内容
 	Deliver(proposal bft.Proposal, signature []bft.Signature) bft.Reconfig
 }
 
@@ -40,6 +42,7 @@ type Assembler interface {
 type WriteAheadLog interface {
 	// Append appends a data item to the end of the WAL
 	// and indicate whether this entry is a truncation point.
+	// Append将数据项附加到WAL的末尾，并指示此entry是否为截断点
 	Append(entry []byte, truncateTo bool) error
 }
 

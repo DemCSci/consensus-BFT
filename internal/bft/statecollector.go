@@ -15,6 +15,7 @@ import (
 )
 
 // StateCollector collects the current state from other nodes
+// 从其他节点收集当前状态
 type StateCollector struct {
 	SelfID uint64
 	N      uint64
@@ -39,7 +40,7 @@ func (s *StateCollector) Start() {
 	s.quorum, s.f = computeQuorum(s.N)
 	s.stopChan = make(chan struct{})
 	s.stopOnce = sync.Once{}
-
+	// 接收投票的规则：是StateTransferResponse消息就可以
 	acceptResponse := func(_ uint64, message *protos.Message) bool {
 		return message.GetStateTransferResponse() != nil
 	}
@@ -50,6 +51,7 @@ func (s *StateCollector) Start() {
 }
 
 // HandleMessage handle messages addressed to the state collector
+// 分发 发往状态收集器的消息
 func (s *StateCollector) HandleMessage(sender uint64, m *protos.Message) {
 	if m.GetStateTransferResponse() == nil {
 		s.Logger.Panicf("Node %d handling a message which is not a response", s.SelfID)
@@ -74,12 +76,13 @@ func (s *StateCollector) ClearCollected() {
 }
 
 // CollectStateResponses return a valid response or nil if reached timeout
+// 返回一个有效的响应 如果达到超时 返回nil
 func (s *StateCollector) CollectStateResponses() *types.ViewAndSeq {
 	s.responses.clear(s.N)
-
+	// 设置超时定时器
 	timer := time.NewTimer(s.CollectTimeout)
 	defer timer.Stop()
-
+	// 开始收集 state responses
 	s.Logger.Debugf("Node %d started collecting state responses", s.SelfID)
 
 	for {
@@ -87,6 +90,7 @@ func (s *StateCollector) CollectStateResponses() *types.ViewAndSeq {
 		case <-s.stopChan:
 			return nil
 		case <-timer.C:
+			//collector 超时了，直接返回nil
 			s.Logger.Infof("Node %d reached the state collector timeout", s.SelfID)
 			return nil
 		case msg := <-s.incMsgs:
@@ -100,7 +104,9 @@ func (s *StateCollector) CollectStateResponses() *types.ViewAndSeq {
 	}
 }
 
+// 收集到f+1个相等的viewNumber和seq，返回viewNumber和seq，如果没有收集到 返回 false
 func (s *StateCollector) collectedEnoughEqualVotes() *types.ViewAndSeq {
+	// 收集到 少于=f个 直接返回nil
 	if len(s.responses.voted) <= s.f {
 		return nil
 	}
@@ -122,6 +128,7 @@ func (s *StateCollector) collectedEnoughEqualVotes() *types.ViewAndSeq {
 		votesMap[viewAndSeq]++
 	}
 	for viewAndSeq, count := range votesMap {
+		// 收集到了 f+1个相同的 响应
 		if count > uint64(s.f) {
 			return &viewAndSeq
 		}

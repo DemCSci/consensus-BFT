@@ -282,6 +282,7 @@ func (c *Controller) OnRequestTimeout(request []byte, info types.RequestInfo) {
 }
 
 // OnLeaderFwdRequestTimeout is called when the leader-forward timeout expires, and complains about the leader.
+// 当leader-forward超时到期时，并抱怨leader
 // Called by the request-pool timeout goroutine. Upon return, the auto-remove timeout is started.
 func (c *Controller) OnLeaderFwdRequestTimeout(request []byte, info types.RequestInfo) {
 	iAm, leaderID := c.iAmTheLeader()
@@ -616,6 +617,7 @@ func (c *Controller) checkIfRotate(blacklist []uint64) bool {
 
 func (c *Controller) sync() (viewNum uint64, seq uint64, decisions uint64) {
 	// Block any concurrent sync attempt.
+	// 阻止任何并发同步尝试
 	c.grabSyncToken()
 	// At exit, enable sync once more, but ignore
 	// all synchronization attempts done while
@@ -627,6 +629,7 @@ func (c *Controller) sync() (viewNum uint64, seq uint64, decisions uint64) {
 
 	syncResponse := c.Synchronizer.Sync()
 	if syncResponse.Reconfig.InReplicatedDecisions {
+		// 如果同步过来的是个 配置，那么就关闭controller和viewChanger
 		c.close()
 		c.ViewChanger.close()
 	}
@@ -756,6 +759,7 @@ func (c *Controller) maybePruneInFlight(syncResultViewMD *protos.ViewMetadata) {
 	c.InFlight.clear()
 }
 
+// 从其他节点获取 view 和 seq
 func (c *Controller) fetchState() *types.ViewAndSeq {
 	msg := &protos.Message{
 		Content: &protos.Message_StateTransferRequest{
@@ -763,7 +767,9 @@ func (c *Controller) fetchState() *types.ViewAndSeq {
 		},
 	}
 	c.Collector.ClearCollected()
+	// 先广播发送 StateTransferRequest 消息
 	c.BroadcastConsensus(msg)
+	// 等待收集到F+1个相同的响应 或者等待超时
 	return c.Collector.CollectStateResponses()
 }
 
@@ -832,6 +838,7 @@ func (c *Controller) syncOnStart(startViewNumber uint64, startProposalSequence u
 }
 
 // Start the controller
+// 启动controller
 func (c *Controller) Start(startViewNumber uint64, startProposalSequence uint64, startDecisionsInView uint64, syncOnStart bool) {
 	c.Logger.Debugf("Starting controller with view %d, sequence %d, and decisions %d", startViewNumber, startProposalSequence, startDecisionsInView)
 	c.controllerDone.Add(1)
@@ -898,6 +905,7 @@ func (c *Controller) Stop() {
 }
 
 // StopWithPoolPause the controller but only stop the requests pool timers
+// 关闭了 batcher、requestpool中的定时器 以及 leaderMonitor
 func (c *Controller) StopWithPoolPause() {
 	c.close()
 	c.Batcher.Close()

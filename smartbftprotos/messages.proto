@@ -125,6 +125,6 @@ message StateTransferRequest {
 }
 
 message StateTransferResponse {
-    uint64 view_num = 1;
-    uint64 sequence = 2;
+    uint64 view_num = 1; // view 编号
+    uint64 sequence = 2; // seq 编号
 }

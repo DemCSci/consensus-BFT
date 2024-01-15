@@ -74,6 +74,7 @@ func (b *BatchBuilder) NextBatch() [][]byte {
 }
 
 // Close closes the close channel to stop NextBatch
+// 关闭通道以停止NextBatch
 func (b *BatchBuilder) Close() {
 	b.closeLock.Lock()
 	defer b.closeLock.Unlock()
